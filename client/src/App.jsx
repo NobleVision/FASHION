@@ -9,13 +9,22 @@ import './App.css'
 function App() {
   const [serverStatus, setServerStatus] = useState(null)
 
+  const API_BASE = import.meta.env.VITE_API_BASE || ''
+
   useEffect(() => {
-    // Check server health
-    fetch('/api/health')
-      .then(res => res.json())
-      .then(data => setServerStatus(data))
-      .catch(err => console.error('Server health check failed:', err))
-  }, [])
+    const checkHealth = async () => {
+      try {
+        const res = await fetch(`${API_BASE}/api/health`)
+        if (!res.ok) throw new Error(`Health ${res.status}`)
+        const data = await res.json()
+        setServerStatus(data)
+      } catch (err) {
+        console.warn('Server health check failed:', err?.message || err)
+        setServerStatus({ status: 'offline' })
+      }
+    }
+    checkHealth()
+  }, [API_BASE])
 
   return (
     <Router>

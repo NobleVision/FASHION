@@ -19,6 +19,8 @@ const Dashboard = () => {
   const [isGenerating, setIsGenerating] = useState(false)
   const [generatedImage, setGeneratedImage] = useState(null)
 
+  const API_BASE = import.meta.env.VITE_API_BASE || ''
+
   useEffect(() => {
     fetchCategories()
   }, [])
@@ -26,21 +28,21 @@ const Dashboard = () => {
   const fetchCategories = async () => {
     try {
       // Try the combined endpoint first
-      const response = await fetch('/api/categories')
+      const response = await fetch(`${API_BASE}/api/categories`)
       if (response.ok) {
         const data = await response.json()
         console.log('Categories fetched:', data)
         setCategories(data)
         return
       }
-      
+
       // Fallback: try individual endpoints
       const types = ['accessory', 'pose', 'location', 'makeup']
       const categoryData = {}
-      
+
       for (const type of types) {
         try {
-          const typeResponse = await fetch(`/api/categories/${type}`)
+          const typeResponse = await fetch(`${API_BASE}/api/categories/${type}`)
           if (typeResponse.ok) {
             const typeData = await typeResponse.json()
             categoryData[type] = Array.isArray(typeData) ? typeData : []
@@ -53,7 +55,7 @@ const Dashboard = () => {
           categoryData[type] = []
         }
       }
-      
+
       setCategories(categoryData)
     } catch (error) {
       console.error('Error fetching categories:', error)
@@ -75,7 +77,7 @@ const Dashboard = () => {
     formData.append('image', file)
 
     try {
-      const response = await fetch('/api/upload', {
+      const response = await fetch(`${API_BASE}/api/upload`, {
         method: 'POST',
         body: formData,
       })
@@ -147,7 +149,7 @@ const Dashboard = () => {
   const renderCategoryGrid = (items, type, selectedItems, onSelect) => {
     // Ensure items is always an array
     const itemsArray = Array.isArray(items) ? items : []
-    
+
     if (itemsArray.length === 0) {
       return (
         <div className="text-center py-8 text-gray-500">
@@ -170,11 +172,11 @@ const Dashboard = () => {
             }`}
           >
             <img
-              src={item.url || '/placeholder.jpg'}
+              src={item.url || 'https://via.placeholder.com/300?text=No+Image'}
               alt={item.name}
               className="w-full h-24 object-cover rounded"
               onError={(e) => {
-                e.target.src = '/placeholder.jpg'
+                e.target.src = 'https://via.placeholder.com/300?text=No+Image'
               }}
             />
             <p className="text-sm mt-1 text-center">{item.name}</p>
@@ -187,7 +189,7 @@ const Dashboard = () => {
   return (
     <div className="max-w-6xl mx-auto p-6">
       <h1 className="text-3xl font-bold text-center mb-8">Fashion Studio</h1>
-      
+
       {/* Upload Section */}
       <div className="mb-8">
         <h2 className="text-xl font-semibold mb-4">Upload Your Photo</h2>
