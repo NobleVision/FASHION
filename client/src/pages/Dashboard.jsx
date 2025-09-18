@@ -1,0 +1,248 @@
+import React, { useState, useEffect } from 'react'
+import { useDropzone } from 'react-dropzone'
+import toast from 'react-hot-toast'
+
+const Dashboard = () => {
+  const [uploadedImage, setUploadedImage] = useState(null)
+  const [categories, setCategories] = useState({
+    accessory: [],
+    pose: [],
+    location: [],
+    makeup: []
+  })
+  const [selectedItems, setSelectedItems] = useState({
+    accessory: [],
+    pose: [],
+    location: [],
+    makeup: []
+  })
+  const [isGenerating, setIsGenerating] = useState(false)
+  const [generatedImage, setGeneratedImage] = useState(null)
+
+  useEffect(() => {
+    fetchCategories()
+  }, [])
+
+  const fetchCategories = async () => {
+    try {
+      // Try the combined endpoint first
+      const response = await fetch('/api/categories')
+      if (response.ok) {
+        const data = await response.json()
+        console.log('Categories fetched:', data)
+        setCategories(data)
+        return
+      }
+      
+      // Fallback: try individual endpoints
+      const types = ['accessory', 'pose', 'location', 'makeup']
+      const categoryData = {}
+      
+      for (const type of types) {
+        try {
+          const typeResponse = await fetch(`/api/categories/${type}`)
+          if (typeResponse.ok) {
+            const typeData = await typeResponse.json()
+            categoryData[type] = Array.isArray(typeData) ? typeData : []
+          } else {
+            console.warn(`Failed to fetch ${type} categories`)
+            categoryData[type] = []
+          }
+        } catch (error) {
+          console.error(`Error fetching ${type}:`, error)
+          categoryData[type] = []
+        }
+      }
+      
+      setCategories(categoryData)
+    } catch (error) {
+      console.error('Error fetching categories:', error)
+      // Set empty arrays as fallback
+      setCategories({
+        accessory: [],
+        pose: [],
+        location: [],
+        makeup: []
+      })
+    }
+  }
+
+  const onDrop = async (acceptedFiles) => {
+    const file = acceptedFiles[0]
+    if (!file) return
+
+    const formData = new FormData()
+    formData.append('image', file)
+
+    try {
+      const response = await fetch('/api/upload', {
+        method: 'POST',
+        body: formData,
+      })
+
+      if (response.ok) {
+        const data = await response.json()
+        setUploadedImage(data.url)
+        toast.success('Image uploaded successfully!')
+      } else {
+        toast.error('Failed to upload image')
+      }
+    } catch (error) {
+      console.error('Upload error:', error)
+      toast.error('Upload failed')
+    }
+  }
+
+  const { getRootProps, getInputProps, isDragActive } = useDropzone({
+    onDrop,
+    accept: {
+      'image/*': ['.jpeg', '.jpg', '.png', '.gif']
+    },
+    multiple: false
+  })
+
+  const handleItemSelect = (type, itemId) => {
+    setSelectedItems(prev => ({
+      ...prev,
+      [type]: prev[type].includes(itemId)
+        ? prev[type].filter(id => id !== itemId)
+        : [...prev[type], itemId]
+    }))
+  }
+
+  const generateFashionLook = async () => {
+    if (!uploadedImage) {
+      toast.error('Please upload an image first')
+      return
+    }
+
+    setIsGenerating(true)
+    try {
+      const response = await fetch('/api/generate-fashion', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          baseImageUrl: uploadedImage,
+          selectedItems
+        }),
+      })
+
+      if (response.ok) {
+        const data = await response.json()
+        setGeneratedImage(data.imageUrl)
+        toast.success('Fashion look generated!')
+      } else {
+        toast.error('Failed to generate fashion look')
+      }
+    } catch (error) {
+      console.error('Generation error:', error)
+      toast.error('Generation failed')
+    } finally {
+      setIsGenerating(false)
+    }
+  }
+
+  const renderCategoryGrid = (items, type, selectedItems, onSelect) => {
+    // Ensure items is always an array
+    const itemsArray = Array.isArray(items) ? items : []
+    
+    if (itemsArray.length === 0) {
+      return (
+        <div className="text-center py-8 text-gray-500">
+          <p>No {type} items available.</p>
+          <p className="text-sm">Add some in the Categories page!</p>
+        </div>
+      )
+    }
+
+    return (
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+        {itemsArray.map((item) => (
+          <div
+            key={item.id}
+            onClick={() => onSelect(item.id)}
+            className={`cursor-pointer border-2 rounded-lg p-2 transition-all ${
+              selectedItems.includes(item.id)
+                ? 'border-purple-500 bg-purple-50'
+                : 'border-gray-200 hover:border-purple-300'
+            }`}
+          >
+            <img
+              src={item.url || '/placeholder.jpg'}
+              alt={item.name}
+              className="w-full h-24 object-cover rounded"
+              onError={(e) => {
+                e.target.src = '/placeholder.jpg'
+              }}
+            />
+            <p className="text-sm mt-1 text-center">{item.name}</p>
+          </div>
+        ))}
+      </div>
+    )
+  }
+
+  return (
+    <div className="max-w-6xl mx-auto p-6">
+      <h1 className="text-3xl font-bold text-center mb-8">Fashion Studio</h1>
+      
+      {/* Upload Section */}
+      <div className="mb-8">
+        <h2 className="text-xl font-semibold mb-4">Upload Your Photo</h2>
+        <div
+          {...getRootProps()}
+          className={`border-2 border-dashed rounded-lg p-8 text-center cursor-pointer transition-colors ${
+            isDragActive ? 'border-purple-500 bg-purple-50' : 'border-gray-300'
+          }`}
+        >
+          <input {...getInputProps()} />
+          {uploadedImage ? (
+            <img src={uploadedImage} alt="Uploaded" className="max-w-xs mx-auto rounded" />
+          ) : (
+            <p>Drag & drop an image here, or click to select</p>
+          )}
+        </div>
+      </div>
+
+      {/* Categories */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-8 mb-8">
+        {Object.entries(categories).map(([type, items]) => (
+          <div key={type} className="bg-white rounded-lg shadow p-6">
+            <h3 className="text-lg font-semibold mb-4 capitalize">{type}</h3>
+            {renderCategoryGrid(
+              items,
+              type,
+              selectedItems[type] || [],
+              (itemId) => handleItemSelect(type, itemId)
+            )}
+          </div>
+        ))}
+      </div>
+
+      {/* Generate Button */}
+      <div className="text-center mb-8">
+        <button
+          onClick={generateFashionLook}
+          disabled={!uploadedImage || isGenerating}
+          className="bg-purple-600 text-white px-8 py-3 rounded-lg font-semibold disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          {isGenerating ? 'Generating...' : 'Generate Fashion Look'}
+        </button>
+      </div>
+
+      {/* Generated Image */}
+      {generatedImage && (
+        <div className="text-center">
+          <h3 className="text-xl font-semibold mb-4">Your Fashion Look</h3>
+          <img src={generatedImage} alt="Generated fashion look" className="max-w-md mx-auto rounded-lg shadow" />
+        </div>
+      )}
+    </div>
+  )
+}
+
+export default Dashboard
+
+
