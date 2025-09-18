@@ -6,7 +6,7 @@
     "dev": "concurrently \"npm run server\" \"npm run client\"",
     "server": "set PORT=3001 && nodemon server/index.js",
     "client": "cd client && npx vite --host 0.0.0.0 --port 5000",
-    "build": "cd client && vite build",
+    "build": "npm --prefix client ci --include=dev && npm --prefix client run build",
     "db:init": "node server/db/init.js",
     "preview": "cd client && vite preview --host 0.0.0.0 --port 5000",
     "test:vertex": "node server/test-vertex-ai.js"
