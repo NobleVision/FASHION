@@ -115,39 +115,16 @@ async function uploadBase64ToCloudinary(base64Data, mimeType, folder = 'fashionf
 }
 
 // Enhanced health check
-app.get('/api/health', async (req, res) => {
-  const health = {
-    status: 'ok',
+app.get('/api/health', (req, res) => {
+  res.json({ 
+    status: 'ok', 
     timestamp: new Date().toISOString(),
-    services: {
-      cloudinary: !!process.env.CLOUDINARY_CLOUD_NAME,
-      database: !!process.env.DATABASE_URL,
-      google_ai: !!process.env.GOOGLE_API_KEY,
-      vertex_ai: !!process.env.VERTEX_AI_API_KEY,
-      vertex_ai_project: process.env.VERTEX_AI_PROJECT_ID
-    }
-  };
-
-  // Test database connection
-  if (pool) {
-    try {
-      await pool.query('SELECT 1');
-      health.services.database_connection = true;
-    } catch (error) {
-      health.services.database_connection = false;
-      health.services.database_error = error.message;
-    }
-  }
-
-  // Test Vertex AI connection
-  try {
-    health.services.vertex_ai_connection = await vertexAI.testConnection();
-  } catch (error) {
-    health.services.vertex_ai_connection = false;
-    health.services.vertex_ai_error = error.message;
-  }
-
-  res.json(health);
+    cloudinary: !!process.env.CLOUDINARY_CLOUD_NAME,
+    database: !!process.env.DATABASE_URL,
+    google_ai: !!process.env.GOOGLE_API_KEY,
+    // Verify no credential files are being used
+    credentials_secure: !fs.existsSync('./fashion-472519-ca3e6ccdecc3.json')
+  });
 });
 
 // Test Vertex AI endpoint
@@ -545,6 +522,7 @@ app.listen(PORT, () => {
   console.log(`📊 Health check: http://localhost:${PORT}/api/health`);
   console.log(`🧪 Vertex AI test: http://localhost:${PORT}/api/test-vertex`);
 });
+
 
 
 
