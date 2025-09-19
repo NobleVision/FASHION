@@ -1,7 +1,7 @@
 const { ok, fail } = require('./_lib/http')
 const { getPool } = require('./_lib/db')
 const { getCloudinary } = require('./_lib/cloudinary')
-const { getGoogleAuth } = require('./_lib/vertex')
+const { getGoogleAuth, getCredentialsObject } = require('./_lib/vertex')
 
 async function imageUrlToBase64(url) {
   try {
@@ -29,8 +29,8 @@ async function uploadBase64ToCloudinary(base64Data, mimeType, folder = 'fashionf
   })
 }
 
-async function vertexGenerateImage(prompt) {
-  // Implements REST call similar to server/services/vertexai-rest.js
+async function vertexGenerateImage(prompt, primaryImageBase64 = null, extraImagesBase64 = []) {
+  // REST call to Imagen 3 with optional image conditioning (single or multi-image hints)
   try {
     const auth = getGoogleAuth()
     const client = await auth.getClient()
@@ -39,8 +39,30 @@ async function vertexGenerateImage(prompt) {
     const location = 'us-central1'
     const endpoint = `https://${location}-aiplatform.googleapis.com/v1/projects/${projectId}/locations/${location}/publishers/google/models/imagen-3.0-generate-001:predict`
 
+    // Build a flexible instance that includes commonly recognized fields for image-to-image
+    const instance = { prompt }
+    if (primaryImageBase64) {
+      instance.image = { bytesBase64Encoded: primaryImageBase64 }
+      instance.input_image = primaryImageBase64
+      instance.image_base64 = primaryImageBase64
+    }
+    if (Array.isArray(extraImagesBase64) && extraImagesBase64.length > 0) {
+      const [img2, img3] = extraImagesBase64
+      if (img2) {
+        instance.reference_image = img2
+        instance.style_image = img2
+        instance.image2 = img2
+        instance.image_2 = img2
+      }
+      if (img3) {
+        instance.image3 = img3
+        instance.image_3 = img3
+      }
+      instance.images = [primaryImageBase64, ...extraImagesBase64].filter(Boolean)
+    }
+
     const requestBody = {
-      instances: [{ prompt }],
+      instances: [instance],
       parameters: {
         sampleCount: 1,
         aspectRatio: '1:1',
@@ -49,7 +71,11 @@ async function vertexGenerateImage(prompt) {
       }
     }
 
-    console.log(`[${new Date().toISOString()}] ▶ Vertex REST request:`, JSON.stringify(requestBody))
+    console.log(`[${new Date().toISOString()}] ▶ Vertex REST request`, {
+      hasPrimary: Boolean(primaryImageBase64),
+      extraCount: Array.isArray(extraImagesBase64) ? extraImagesBase64.length : 0,
+      prompt: prompt?.slice(0, 180)
+    })
 
     const resp = await fetch(endpoint, {
       method: 'POST',
@@ -68,9 +94,57 @@ async function vertexGenerateImage(prompt) {
 
     const data = await resp.json()
     const pred = data?.predictions?.[0]
-    if (pred?.bytesBase64Encoded) {
-      return { success: true, imageBase64: pred.bytesBase64Encoded, mimeType: pred.mimeType || 'image/png' }
+    const candidates = data?.candidates?.[0]
+
+    // Try several common output locations
+    let out = (
+      (pred && (pred.bytesBase64Encoded || pred.imageBytesBase64 || pred.base64 || pred.image)) ||
+      (pred?.image && pred.image.bytesBase64Encoded) ||
+      (pred?.media && pred.media[0] && (pred.media[0].bytesBase64Encoded || pred.media[0].data)) ||
+      (candidates?.content?.parts || []).find(p => p.inline_data)?.inline_data?.data
+    )
+    let mt = pred?.mimeType || pred?.mime_type || 'image/png'
+
+    if (!out) {
+      // Log unexpected shape for troubleshooting
+      try {
+        const keys = Object.keys(data || {})
+        console.warn(`[${new Date().toISOString()}] ℹ️ Unexpected Vertex response shape (no image). Top-level keys:`, keys)
+      } catch {}
+
+      // SDK fallback using official client (more tolerant to schema changes)
+      try {
+        const { VertexAI } = require('@google-cloud/vertexai')
+        let credentials
+        try {
+          const raw = process.env.GOOGLE_CREDENTIALS_JSON || process.env.GOOGLE_APPLICATION_CREDENTIALS
+          if (raw && raw.trim().startsWith('{')) credentials = JSON.parse(raw)
+        } catch {}
+        const project = process.env.GOOGLE_CLOUD_PROJECT_ID || process.env.VERTEX_AI_PROJECT_ID || 'fashion-472519'
+        const vertex_ai = new (VertexAI)({
+          project,
+          location: 'us-central1',
+          googleAuthOptions: credentials ? { credentials } : undefined
+        })
+        const model = vertex_ai.preview.getGenerativeModel({ model: 'imagen-3.0-generate-001' })
+        const parts = [{ text: prompt }]
+        if (primaryImageBase64) parts.push({ inline_data: { mime_type: 'image/png', data: primaryImageBase64 } })
+        if (Array.isArray(extraImagesBase64)) {
+          for (const b64 of extraImagesBase64) if (b64) parts.push({ inline_data: { mime_type: 'image/png', data: b64 } })
+        }
+        const request = { contents: [{ role: 'user', parts }], generation_config: { temperature: 0.4 } }
+        const sdkResult = await model.generateContent(request)
+        out = sdkResult?.response?.candidates?.[0]?.content?.parts?.find(p => p.inline_data)?.inline_data?.data
+        mt = 'image/png'
+      } catch (sdkErr) {
+        console.warn(`[${new Date().toISOString()}] ⚠️ Vertex SDK fallback failed:`, sdkErr?.message || sdkErr)
+      }
     }
+
+    if (out) {
+      return { success: true, imageBase64: out, mimeType: mt }
+    }
+
     throw new Error('No image data in response')
   } catch (error) {
     console.error(`[${new Date().toISOString()}] ❌ Vertex AI generation failed:`, error?.message || error)
@@ -82,8 +156,13 @@ async function vertexGenerateImage(prompt) {
   }
 }
 
+function buildLabel(row) {
+  return `${row.name}${row.subcategory ? ` (${row.subcategory})` : ''}`
+}
+
 module.exports = async (req, res) => {
   try {
+
     if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' })
 
     const body = typeof req.body === 'string' ? JSON.parse(req.body) : (req.body || {})
@@ -118,6 +197,80 @@ module.exports = async (req, res) => {
       const q = await pool.query('SELECT * FROM categories WHERE id = ANY($1) AND type = $2', [makeup, 'makeup'])
       makeupDetails = q.rows
     }
+    // Step-by-step mode: perform a single incremental transformation and return
+    const { step, inputImageUrl, accessoryId, makeupId } = body
+    if (step) {
+      let inputUrl = inputImageUrl || userImageUrl
+      if (!inputUrl) return res.status(400).json({ error: 'inputImageUrl or userImageUrl required for step mode' })
+
+      // Convert input to base64
+      let inputBase64 = null
+      if (inputUrl.startsWith('data:')) inputBase64 = inputUrl.split(',')[1]
+      else inputBase64 = await imageUrlToBase64(inputUrl)
+      if (!inputBase64) return res.status(400).json({ error: 'Could not read input image for step' })
+
+      let stepPrompt = ''
+      let extraRefs = [] // optional extra reference images to condition on
+      if (step === 'pose') {
+        const poseLbl = buildLabel(pose)
+        // Try to include the pose reference image as the 2nd image
+        if (pose?.url) {
+          const poseRef = await imageUrlToBase64(pose.url)
+          if (poseRef) extraRefs.push(poseRef)
+        }
+        stepPrompt = `Take the person from the first image and put them in the pose shown in the second image (${poseLbl}). Preserve the person's identity, face, and body exactly. Do not alter gender, age, skin tone, hair, facial structure, or body proportions.`
+      } else if (step === 'location') {
+        const locLbl = buildLabel(location)
+        if (location?.url) {
+          const locRef = await imageUrlToBase64(location.url)
+          if (locRef) extraRefs.push(locRef)
+        }
+        stepPrompt = `Take the person from this image and place them in ${locLbl}. Keep the pose and identity unchanged. Maintain the same person without any facial or body changes.`
+      } else if (step === 'accessory') {
+        // Choose target accessory
+        let accRow = null
+        if (accessoryId) {
+          const q = await pool.query('SELECT * FROM categories WHERE id = $1 AND type = $2', [accessoryId, 'accessory'])
+          accRow = q.rows[0]
+        } else if (accessoryDetails[0]) accRow = accessoryDetails[0]
+        const accLbl = accRow ? buildLabel(accRow) : 'selected accessory'
+        if (accRow?.url) {
+          const accRef = await imageUrlToBase64(accRow.url)
+          if (accRef) extraRefs.push(accRef)
+        }
+        stepPrompt = `Add ${accLbl} to the person in this image. Do not change the person's identity, pose, or location. Keep everything else the same.`
+      } else if (step === 'makeup') {
+        let mkRow = null
+        if (makeupId) {
+          const q = await pool.query('SELECT * FROM categories WHERE id = $1 AND type = $2', [makeupId, 'makeup'])
+          mkRow = q.rows[0]
+        } else if (makeupDetails[0]) mkRow = makeupDetails[0]
+        const mkLbl = mkRow ? buildLabel(mkRow) : 'selected makeup style'
+        if (mkRow?.url) {
+          const mkRef = await imageUrlToBase64(mkRow.url)
+          if (mkRef) extraRefs.push(mkRef)
+        }
+        stepPrompt = `Apply ${mkLbl} to the person in this image. Keep everything else unchanged. Do not change identity, pose, or location.`
+      } else {
+        return res.status(400).json({ error: 'Unknown step' })
+      }
+
+      const stepTs = new Date().toISOString()
+      console.log(`[${stepTs}] 🔁 Step mode -> ${step}`)
+      console.log(`[${stepTs}] 📝 Step prompt:`, stepPrompt)
+
+      const stepResult = await vertexGenerateImage(stepPrompt, inputBase64, extraRefs)
+      let stepUrl
+      if (stepResult.success) {
+        stepUrl = await uploadBase64ToCloudinary(stepResult.imageBase64, stepResult.mimeType)
+      } else {
+        const fb = await imageUrlToBase64(stepResult.fallbackUrl)
+        stepUrl = fb ? await uploadBase64ToCloudinary(fb, 'image/jpeg') : stepResult.fallbackUrl
+      }
+
+      return ok(res, { imageUrl: stepUrl, step, prompt: stepPrompt })
+    }
+
 
     // Build an identity-preserving prompt
     const poseLabel = `${pose.name}${pose.subcategory ? ` (${pose.subcategory})` : ''}`

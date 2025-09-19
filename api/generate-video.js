@@ -29,51 +29,76 @@ async function uploadBase64VideoToCloudinary(base64Data, mimeType = 'video/mp4',
   })
 }
 
-async function vertexGenerateVideo(imageBase64, prompt) {
-  // Attempt a REST call to Veo 3; if it fails, return the same-style fallback as Express
+async function vertexGenerateVideo(imageBase64, prompt, plan = 'fast') {
+  // Attempt a REST call to Veo 3; prefer a cost-optimized/fast tier when available.
   try {
     const auth = getGoogleAuth()
     const client = await auth.getClient()
     const { token } = await client.getAccessToken()
     const projectId = process.env.VERTEX_AI_PROJECT_ID || 'fashion-472519'
     const location = 'us-central1'
-    // NOTE: Veo endpoint/path may vary; we try a plausible path and gracefully fallback upon failure
-    const endpoint = `https://${location}-aiplatform.googleapis.com/v1/projects/${projectId}/locations/${location}/publishers/google/models/veo-3.0:predict`
 
-    const requestBody = {
+    // Try fast/economy first (if unsupported, we fall back to standard)
+    const modelAttempts = [
+      // Hypothetical fast/economy variants first
+      `projects/${projectId}/locations/${location}/publishers/google/models/veo-3.0-fast-generate-preview`,
+      `projects/${projectId}/locations/${location}/publishers/google/models/veo-2.0-fast-generate-001`,
+      // Standard models
+      `projects/${projectId}/locations/${location}/publishers/google/models/veo-3.0-generate-preview`,
+      `projects/${projectId}/locations/${location}/publishers/google/models/veo-2.0-generate-001`,
+      // Legacy catch-all
+      `projects/${projectId}/locations/${location}/publishers/google/models/veo-3.0`
+    ]
+
+    const commonParameters = {
+      output_mime_type: 'video/mp4',
+      sampleCount: 1,
+      durationSeconds: 5,
+      // Hints for economical tier (if the backend honors them)
+      preset: plan === 'fast' ? 'economy' : 'standard',
+      plan: plan,
+      mode: plan === 'fast' ? 'FAST' : 'STANDARD'
+    }
+
+    const requestBody = (parametersOverride = {}) => ({
       instances: [{
-        // Hypothetical request shape; service differences are handled by fallback if not accepted
         prompt,
-        image: imageBase64
+        // Some Veo endpoints accept an inline base64 image under a field like "image" or "input_image".
+        // We provide both; unsupported fields will be ignored by the backend.
+        image: imageBase64,
+        input_image: imageBase64
       }],
-      parameters: {
-        output_mime_type: 'video/mp4',
-        sampleCount: 1,
-        durationSeconds: 5
+      parameters: { ...commonParameters, ...parametersOverride }
+    })
+
+    let lastErrText = ''
+    for (const modelPath of modelAttempts) {
+      const endpoint = `https://${location}-aiplatform.googleapis.com/v1/${modelPath}:predict`
+      console.log(`[Veo] Attempting model: ${modelPath} (plan=${plan})`)
+      const resp = await fetch(endpoint, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify(requestBody())
+      })
+      if (resp.ok) {
+        const data = await resp.json()
+        const pred = data?.predictions?.[0]
+        if (pred?.bytesBase64Encoded) {
+          return { success: true, videoBase64: pred.bytesBase64Encoded, mimeType: pred.mimeType || 'video/mp4' }
+        }
+        // Some endpoints may return a different field name
+        if (pred?.videoBytesBase64) {
+          return { success: true, videoBase64: pred.videoBytesBase64, mimeType: pred.mimeType || 'video/mp4' }
+        }
+      } else {
+        const errBody = await resp.text().catch(() => '')
+        lastErrText = `${resp.status} ${errBody}`
+        console.warn(`[Veo] Model attempt failed: ${modelPath} -> ${lastErrText}`)
+        continue
       }
     }
 
-    const resp = await fetch(endpoint, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${token}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify(requestBody)
-    })
-
-    if (!resp.ok) {
-      const errBody = await resp.text().catch(() => '')
-      console.error('Vertex AI Veo API error:', resp.status, errBody)
-      throw new Error(`Vertex AI Veo API error: ${resp.status}`)
-    }
-
-    const data = await resp.json()
-    const pred = data?.predictions?.[0]
-    if (pred?.bytesBase64Encoded) {
-      return { success: true, videoBase64: pred.bytesBase64Encoded, mimeType: pred.mimeType || 'video/mp4' }
-    }
-    throw new Error('No video data in response')
+    throw new Error(`All Veo attempts failed. Last error: ${lastErrText}`)
   } catch (error) {
     console.error('Vertex AI video generation failed:', error?.message || error)
     return {
@@ -89,7 +114,7 @@ module.exports = async (req, res) => {
     if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' })
 
     const body = typeof req.body === 'string' ? JSON.parse(req.body) : (req.body || {})
-    const { imageUrl, customPrompt = '', generationId } = body
+    const { imageUrl, customPrompt = '', generationId, plan = 'fast' } = body
 
     if (!imageUrl) {
       return res.status(400).json({ error: 'Image URL is required for video generation' })
@@ -107,8 +132,8 @@ module.exports = async (req, res) => {
       return res.status(400).json({ error: 'Could not process input image' })
     }
 
-    // Request video generation
-    const result = await vertexGenerateVideo(imageBase64, videoPrompt)
+    // Request video generation (prefer economical/fast plan)
+    const result = await vertexGenerateVideo(imageBase64, videoPrompt, plan)
 
     let finalVideoUrl
     let generationStatus = 'success'
