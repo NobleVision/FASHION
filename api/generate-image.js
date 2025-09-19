@@ -145,7 +145,20 @@ module.exports = async (req, res) => {
       finalImageUrl = await uploadBase64ToCloudinary(result.imageBase64, result.mimeType)
       console.log('✅ Image generated and uploaded successfully')
     } else {
-      finalImageUrl = result.fallbackUrl
+      // Upload fallback image to Cloudinary as well
+      try {
+        const fallbackBase64 = await imageUrlToBase64(result.fallbackUrl)
+        if (fallbackBase64) {
+          finalImageUrl = await uploadBase64ToCloudinary(fallbackBase64, 'image/jpeg')
+          console.log('✅ Fallback image uploaded to Cloudinary')
+        } else {
+          finalImageUrl = result.fallbackUrl
+          console.log('⚠️  Failed to convert fallback to base64, using original URL')
+        }
+      } catch (uploadErr) {
+        console.error('❌ Failed to upload fallback to Cloudinary:', uploadErr)
+        finalImageUrl = result.fallbackUrl
+      }
       generationStatus = 'fallback'
       errorMessage = result.error
       console.log('⚠️  Using fallback image due to error:', result.error)

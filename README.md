@@ -129,3 +129,34 @@ For a quick smoke test without running browsers:
 node scripts/local-verify.js
 ```
 This script calls the serverless handlers directly to validate DB init, categories, image generation, generations listing, save-generation, and video generation (with fallback if needed).
+
+
+## TODO - Post-Migration Cleanup & Issues
+
+### 1. Remove Legacy Server Folder (After Reboot)
+The empty `/server` directory is currently locked by a Windows process and cannot be deleted. After rebooting the development machine, run:
+```powershell
+Remove-Item -Recurse -Force server
+```
+This folder is a remnant from the Express.js architecture and should be completely removed to avoid confusion.
+
+### 2. Fix Production Upload Endpoint (CRITICAL)
+The deployed application at https://fashion.noblevision.com has a broken image upload functionality:
+- Error: `POST /api/upload 400 (Bad Request)`
+- Categories are loading correctly (accessory: 40, pose: 23, location: 23, makeup: 20)
+- Images are successfully stored in Cloudinary but the upload endpoint is returning 400 errors
+
+**Investigation needed:**
+- Check Vercel function logs for `/api/upload` endpoint
+- Verify multipart form handling with Busboy in serverless environment
+- Ensure all environment variables are properly set in Vercel dashboard
+- Test the upload endpoint directly to isolate frontend vs backend issues
+
+### 3. Feature Enhancement: Image Gallery Selection
+Add functionality to allow users to select from previously uploaded images stored in Cloudinary instead of only allowing new uploads. This would improve user experience by letting them reuse existing photos for different fashion generation requests.
+
+**Implementation considerations:**
+- Query Cloudinary API for user's uploaded images
+- Add image gallery UI component to the upload interface
+- Store user-image associations in the database for proper filtering
+- Add pagination for large image collections
