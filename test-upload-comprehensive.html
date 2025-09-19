@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Comprehensive Upload Test</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; }
+        .test-section { margin: 20px 0; padding: 15px; border: 1px solid #ccc; }
+        .result { margin: 10px 0; padding: 10px; background: #f5f5f5; }
+        .success { background: #d4edda; color: #155724; }
+        .error { background: #f8d7da; color: #721c24; }
+        button { margin: 5px; padding: 10px 15px; }
+        pre { white-space: pre-wrap; }
+    </style>
+</head>
+<body>
+    <h1>Comprehensive Upload Test</h1>
+    
+    <div class="test-section">
+        <h2>Test 1: Basic Connectivity</h2>
+        <button onclick="testConnectivity()">Test API Connectivity</button>
+        <div id="connectivity-result" class="result"></div>
+    </div>
+
+    <div class="test-section">
+        <h2>Test 2: CORS Preflight</h2>
+        <button onclick="testCORS()">Test CORS Headers</button>
+        <div id="cors-result" class="result"></div>
+    </div>
+
+    <div class="test-section">
+        <h2>Test 3: Upload with Sample Base64</h2>
+        <button onclick="testSampleUpload()">Test Sample Upload</button>
+        <div id="sample-result" class="result"></div>
+    </div>
+
+    <div class="test-section">
+        <h2>Test 4: Upload Real Image</h2>
+        <input type="file" id="fileInput" accept="image/*">
+        <button onclick="testRealUpload()">Upload Real Image</button>
+        <div id="real-result" class="result"></div>
+    </div>
+
+    <script>
+        const API_BASE = 'http://localhost:3000';
+
+        async function testConnectivity() {
+            const resultDiv = document.getElementById('connectivity-result');
+            resultDiv.innerHTML = 'Testing...';
+            
+            try {
+                const response = await fetch(`${API_BASE}/api/health`);
+                if (response.ok) {
+                    const data = await response.json();
+                    resultDiv.className = 'result success';
+                    resultDiv.innerHTML = '<h4>✅ API is reachable</h4><pre>' + JSON.stringify(data, null, 2) + '</pre>';
+                } else {
+                    resultDiv.className = 'result error';
+                    resultDiv.innerHTML = '<h4>❌ API returned error</h4><p>Status: ' + response.status + '</p>';
+                }
+            } catch (error) {
+                resultDiv.className = 'result error';
+                resultDiv.innerHTML = '<h4>❌ Connection failed</h4><pre>' + error.message + '</pre>';
+            }
+        }
+
+        async function testCORS() {
+            const resultDiv = document.getElementById('cors-result');
+            resultDiv.innerHTML = 'Testing CORS...';
+            
+            try {
+                const response = await fetch(`${API_BASE}/api/upload`, {
+                    method: 'OPTIONS',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    }
+                });
+                
+                const corsHeaders = {
+                    'Access-Control-Allow-Origin': response.headers.get('Access-Control-Allow-Origin'),
+                    'Access-Control-Allow-Methods': response.headers.get('Access-Control-Allow-Methods'),
+                    'Access-Control-Allow-Headers': response.headers.get('Access-Control-Allow-Headers')
+                };
+                
+                resultDiv.className = 'result success';
+                resultDiv.innerHTML = '<h4>✅ CORS preflight successful</h4><pre>' + JSON.stringify(corsHeaders, null, 2) + '</pre>';
+            } catch (error) {
+                resultDiv.className = 'result error';
+                resultDiv.innerHTML = '<h4>❌ CORS test failed</h4><pre>' + error.message + '</pre>';
+            }
+        }
+
+        async function testSampleUpload() {
+            const resultDiv = document.getElementById('sample-result');
+            resultDiv.innerHTML = 'Testing sample upload...';
+            
+            // Create a small sample base64 image (1x1 red pixel PNG)
+            const sampleBase64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI7wAAAABJRU5ErkJggg==';
+            
+            try {
+                const response = await fetch(`${API_BASE}/api/upload`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        image: sampleBase64,
+                        mimeType: 'image/png'
+                    }),
+                });
+
+                if (response.ok) {
+                    const data = await response.json();
+                    resultDiv.className = 'result success';
+                    resultDiv.innerHTML = '<h4>✅ Sample upload successful</h4><pre>' + JSON.stringify(data, null, 2) + '</pre>';
+                    
+                    // If we got a URL, show the image
+                    if (data.url) {
+                        resultDiv.innerHTML += '<p><img src="' + data.url + '" alt="Uploaded image" style="max-width: 200px;"></p>';
+                    }
+                } else {
+                    const errorData = await response.text();
+                    resultDiv.className = 'result error';
+                    resultDiv.innerHTML = '<h4>❌ Sample upload failed</h4><p>Status: ' + response.status + '</p><pre>' + errorData + '</pre>';
+                }
+            } catch (error) {
+                resultDiv.className = 'result error';
+                resultDiv.innerHTML = '<h4>❌ Sample upload error</h4><pre>' + error.message + '</pre>';
+            }
+        }
+
+        async function testRealUpload() {
+            const resultDiv = document.getElementById('real-result');
+            const fileInput = document.getElementById('fileInput');
+            const file = fileInput.files[0];
+            
+            if (!file) {
+                resultDiv.className = 'result error';
+                resultDiv.innerHTML = '<h4>❌ Please select a file first</h4>';
+                return;
+            }
+
+            resultDiv.innerHTML = 'Uploading real image...';
+
+            try {
+                // Convert file to base64
+                const reader = new FileReader();
+                reader.onload = async (e) => {
+                    const base64Data = e.target.result.split(',')[1]; // Remove data:image/...;base64, prefix
+                    
+                    try {
+                        const response = await fetch(`${API_BASE}/api/upload`, {
+                            method: 'POST',
+                            headers: {
+                                'Content-Type': 'application/json',
+                            },
+                            body: JSON.stringify({
+                                image: base64Data,
+                                mimeType: file.type
+                            }),
+                        });
+
+                        if (response.ok) {
+                            const data = await response.json();
+                            resultDiv.className = 'result success';
+                            resultDiv.innerHTML = '<h4>✅ Real upload successful</h4><pre>' + JSON.stringify(data, null, 2) + '</pre>';
+                            
+                            // Show the uploaded image
+                            if (data.url) {
+                                resultDiv.innerHTML += '<p><img src="' + data.url + '" alt="Uploaded image" style="max-width: 300px;"></p>';
+                            }
+                        } else {
+                            const errorData = await response.text();
+                            resultDiv.className = 'result error';
+                            resultDiv.innerHTML = '<h4>❌ Real upload failed</h4><p>Status: ' + response.status + '</p><pre>' + errorData + '</pre>';
+                        }
+                    } catch (error) {
+                        resultDiv.className = 'result error';
+                        resultDiv.innerHTML = '<h4>❌ Real upload error</h4><pre>' + error.message + '</pre>';
+                    }
+                };
+                
+                reader.readAsDataURL(file);
+            } catch (error) {
+                resultDiv.className = 'result error';
+                resultDiv.innerHTML = '<h4>❌ File reading error</h4><pre>' + error.message + '</pre>';
+            }
+        }
+
+        // Run connectivity test on page load
+        window.onload = function() {
+            testConnectivity();
+        };
+    </script>
+</body>
+</html>

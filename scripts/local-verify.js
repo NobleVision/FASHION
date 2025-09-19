@@ -45,12 +45,16 @@ async function main(){
   console.log('\n== generations ==')
   await call(require('../api/generations.js'), { method:'GET' })
 
-  // 7) save-generation (rename last)
+  // 7) uploaded-images (Cloudinary folder scan)
+  console.log('\n== uploaded-images ==')
+  await call(require('../api/uploaded-images.js'), { method:'GET' })
+
+  // 8) save-generation (rename last)
   console.log('\n== save-generation ==')
   const lastGen = (await pool.query("SELECT id FROM generations ORDER BY id DESC LIMIT 1")).rows[0]
   await call(require('../api/save-generation.js'), { method:'POST', body: { generationId: lastGen.id, name: 'My Look' }})
 
-  // 8) generate-video (using the last generation image)
+  // 9) generate-video (using the last generation image)
   console.log('\n== generate-video ==')
   const genRow = (await pool.query("SELECT id, output_image_url FROM generations ORDER BY id DESC LIMIT 1")).rows[0]
   await call(require('../api/generate-video.js'), { method:'POST', body: { imageUrl: genRow.output_image_url, generationId: genRow.id }})

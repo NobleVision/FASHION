@@ -1,0 +1,293 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Complete Workflow Test</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; }
+        .test-section { margin: 20px 0; padding: 15px; border: 1px solid #ccc; }
+        .result { margin: 10px 0; padding: 10px; background: #f5f5f5; }
+        .success { background: #d4edda; color: #155724; }
+        .error { background: #f8d7da; color: #721c24; }
+        .warning { background: #fff3cd; color: #856404; }
+        button { margin: 5px; padding: 10px 15px; }
+        pre { white-space: pre-wrap; }
+        img { max-width: 200px; margin: 10px; }
+        .workflow-step { margin: 10px 0; padding: 10px; border-left: 4px solid #007bff; }
+    </style>
+</head>
+<body>
+    <h1>Complete FashionForge Workflow Test</h1>
+    <p>This test simulates the complete user workflow from uploading an image to generating fashion looks.</p>
+    
+    <div class="test-section">
+        <h2>Step 1: Check API Health</h2>
+        <button onclick="checkHealth()">Check API Health</button>
+        <div id="health-result" class="result"></div>
+    </div>
+
+    <div class="test-section">
+        <h2>Step 2: Check Categories</h2>
+        <button onclick="checkCategories()">Fetch Categories</button>
+        <div id="categories-result" class="result"></div>
+    </div>
+
+    <div class="test-section">
+        <h2>Step 3: Initialize Database (if needed)</h2>
+        <button onclick="initDatabase()">Initialize Database</button>
+        <div id="init-result" class="result"></div>
+    </div>
+
+    <div class="test-section">
+        <h2>Step 4: Seed Default Data (if needed)</h2>
+        <button onclick="seedDefaults()">Seed Default Categories</button>
+        <div id="seed-result" class="result"></div>
+    </div>
+
+    <div class="test-section">
+        <h2>Step 5: Upload User Image</h2>
+        <input type="file" id="userImage" accept="image/*">
+        <button onclick="uploadUserImage()">Upload Image</button>
+        <div id="upload-result" class="result"></div>
+    </div>
+
+    <div class="test-section">
+        <h2>Step 6: Generate Fashion Look</h2>
+        <button onclick="generateFashion()" id="generateBtn" disabled>Generate Fashion Look</button>
+        <div id="generate-result" class="result"></div>
+    </div>
+
+    <div class="workflow-step">
+        <h3>Workflow Status</h3>
+        <div id="workflow-status">Ready to start...</div>
+    </div>
+
+    <script>
+        const API_BASE = 'http://localhost:5000'; // Use the client proxy
+        let uploadedImageUrl = null;
+        let categories = null;
+
+        function updateStatus(message, type = 'info') {
+            const statusDiv = document.getElementById('workflow-status');
+            const timestamp = new Date().toLocaleTimeString();
+            statusDiv.innerHTML += `<div class="${type}">[${timestamp}] ${message}</div>`;
+        }
+
+        async function checkHealth() {
+            const resultDiv = document.getElementById('health-result');
+            resultDiv.innerHTML = 'Checking API health...';
+            updateStatus('Checking API health...');
+            
+            try {
+                const response = await fetch(`${API_BASE}/api/health`);
+                if (response.ok) {
+                    const data = await response.json();
+                    resultDiv.className = 'result success';
+                    resultDiv.innerHTML = '<h4>✅ API is healthy</h4><pre>' + JSON.stringify(data, null, 2) + '</pre>';
+                    updateStatus('API health check passed', 'success');
+                } else {
+                    resultDiv.className = 'result error';
+                    resultDiv.innerHTML = '<h4>❌ API health check failed</h4><p>Status: ' + response.status + '</p>';
+                    updateStatus('API health check failed', 'error');
+                }
+            } catch (error) {
+                resultDiv.className = 'result error';
+                resultDiv.innerHTML = '<h4>❌ Connection failed</h4><pre>' + error.message + '</pre>';
+                updateStatus('API connection failed: ' + error.message, 'error');
+            }
+        }
+
+        async function checkCategories() {
+            const resultDiv = document.getElementById('categories-result');
+            resultDiv.innerHTML = 'Fetching categories...';
+            updateStatus('Fetching categories...');
+            
+            try {
+                const response = await fetch(`${API_BASE}/api/categories`);
+                if (response.ok) {
+                    categories = await response.json();
+                    resultDiv.className = 'result success';
+                    
+                    const counts = Object.entries(categories).map(([type, items]) => 
+                        `${type}: ${items.length} items`
+                    ).join(', ');
+                    
+                    resultDiv.innerHTML = '<h4>✅ Categories fetched</h4><p>' + counts + '</p><pre>' + JSON.stringify(categories, null, 2) + '</pre>';
+                    updateStatus('Categories fetched: ' + counts, 'success');
+                    
+                    // Check if categories are empty
+                    const isEmpty = Object.values(categories).every(arr => arr.length === 0);
+                    if (isEmpty) {
+                        updateStatus('Categories are empty - database initialization may be needed', 'warning');
+                    }
+                } else {
+                    resultDiv.className = 'result error';
+                    resultDiv.innerHTML = '<h4>❌ Failed to fetch categories</h4><p>Status: ' + response.status + '</p>';
+                    updateStatus('Failed to fetch categories', 'error');
+                }
+            } catch (error) {
+                resultDiv.className = 'result error';
+                resultDiv.innerHTML = '<h4>❌ Categories fetch error</h4><pre>' + error.message + '</pre>';
+                updateStatus('Categories fetch error: ' + error.message, 'error');
+            }
+        }
+
+        async function initDatabase() {
+            const resultDiv = document.getElementById('init-result');
+            resultDiv.innerHTML = 'Initializing database...';
+            updateStatus('Initializing database...');
+            
+            try {
+                const response = await fetch(`${API_BASE}/api/init-db`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' }
+                });
+                
+                if (response.ok) {
+                    const data = await response.json();
+                    resultDiv.className = 'result success';
+                    resultDiv.innerHTML = '<h4>✅ Database initialized</h4><pre>' + JSON.stringify(data, null, 2) + '</pre>';
+                    updateStatus('Database initialized successfully', 'success');
+                } else {
+                    const errorData = await response.text();
+                    resultDiv.className = 'result error';
+                    resultDiv.innerHTML = '<h4>❌ Database initialization failed</h4><pre>' + errorData + '</pre>';
+                    updateStatus('Database initialization failed', 'error');
+                }
+            } catch (error) {
+                resultDiv.className = 'result error';
+                resultDiv.innerHTML = '<h4>❌ Database init error</h4><pre>' + error.message + '</pre>';
+                updateStatus('Database init error: ' + error.message, 'error');
+            }
+        }
+
+        async function seedDefaults() {
+            const resultDiv = document.getElementById('seed-result');
+            resultDiv.innerHTML = 'Seeding default data...';
+            updateStatus('Seeding default categories...');
+            
+            try {
+                const response = await fetch(`${API_BASE}/api/seed-defaults`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ types: 'all' })
+                });
+                
+                if (response.ok) {
+                    const data = await response.json();
+                    resultDiv.className = 'result success';
+                    resultDiv.innerHTML = '<h4>✅ Default data seeded</h4><pre>' + JSON.stringify(data, null, 2) + '</pre>';
+                    updateStatus('Default categories seeded successfully', 'success');
+                    
+                    // Refresh categories
+                    setTimeout(checkCategories, 1000);
+                } else {
+                    const errorData = await response.text();
+                    resultDiv.className = 'result error';
+                    resultDiv.innerHTML = '<h4>❌ Seeding failed</h4><pre>' + errorData + '</pre>';
+                    updateStatus('Default data seeding failed', 'error');
+                }
+            } catch (error) {
+                resultDiv.className = 'result error';
+                resultDiv.innerHTML = '<h4>❌ Seeding error</h4><pre>' + error.message + '</pre>';
+                updateStatus('Seeding error: ' + error.message, 'error');
+            }
+        }
+
+        async function uploadUserImage() {
+            const resultDiv = document.getElementById('upload-result');
+            const fileInput = document.getElementById('userImage');
+            const file = fileInput.files[0];
+            
+            if (!file) {
+                resultDiv.className = 'result error';
+                resultDiv.innerHTML = '<h4>❌ Please select an image file</h4>';
+                updateStatus('No image file selected', 'error');
+                return;
+            }
+
+            resultDiv.innerHTML = 'Uploading image...';
+            updateStatus('Uploading user image...');
+
+            try {
+                // Convert file to base64
+                const reader = new FileReader();
+                reader.onload = async (e) => {
+                    const base64Data = e.target.result.split(',')[1];
+                    
+                    try {
+                        const response = await fetch(`${API_BASE}/api/upload`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                                image: base64Data,
+                                mimeType: file.type
+                            }),
+                        });
+
+                        if (response.ok) {
+                            const data = await response.json();
+                            uploadedImageUrl = data.url;
+                            resultDiv.className = 'result success';
+                            resultDiv.innerHTML = '<h4>✅ Image uploaded successfully</h4>' +
+                                '<p>URL: ' + data.url + '</p>' +
+                                '<img src="' + data.url + '" alt="Uploaded image">';
+                            updateStatus('Image uploaded successfully', 'success');
+                            
+                            // Enable generate button
+                            document.getElementById('generateBtn').disabled = false;
+                        } else {
+                            const errorData = await response.text();
+                            resultDiv.className = 'result error';
+                            resultDiv.innerHTML = '<h4>❌ Upload failed</h4><pre>' + errorData + '</pre>';
+                            updateStatus('Image upload failed', 'error');
+                        }
+                    } catch (error) {
+                        resultDiv.className = 'result error';
+                        resultDiv.innerHTML = '<h4>❌ Upload error</h4><pre>' + error.message + '</pre>';
+                        updateStatus('Upload error: ' + error.message, 'error');
+                    }
+                };
+                
+                reader.readAsDataURL(file);
+            } catch (error) {
+                resultDiv.className = 'result error';
+                resultDiv.innerHTML = '<h4>❌ File reading error</h4><pre>' + error.message + '</pre>';
+                updateStatus('File reading error: ' + error.message, 'error');
+            }
+        }
+
+        async function generateFashion() {
+            const resultDiv = document.getElementById('generate-result');
+            
+            if (!uploadedImageUrl) {
+                resultDiv.className = 'result error';
+                resultDiv.innerHTML = '<h4>❌ Please upload an image first</h4>';
+                updateStatus('No uploaded image for fashion generation', 'error');
+                return;
+            }
+
+            resultDiv.innerHTML = 'Generating fashion look...';
+            updateStatus('Generating fashion look...');
+
+            try {
+                // For now, just show that we have the uploaded image ready for generation
+                resultDiv.className = 'result success';
+                resultDiv.innerHTML = '<h4>✅ Ready for fashion generation</h4>' +
+                    '<p>Uploaded image URL: ' + uploadedImageUrl + '</p>' +
+                    '<p>Note: Fashion generation endpoint would be called here with the uploaded image and selected categories.</p>';
+                updateStatus('Fashion generation workflow ready', 'success');
+            } catch (error) {
+                resultDiv.className = 'result error';
+                resultDiv.innerHTML = '<h4>❌ Generation error</h4><pre>' + error.message + '</pre>';
+                updateStatus('Fashion generation error: ' + error.message, 'error');
+            }
+        }
+
+        // Auto-start the workflow
+        window.onload = function() {
+            updateStatus('Starting complete workflow test...');
+            checkHealth();
+        };
+    </script>
+</body>
+</html>

@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Upload Test</title>
+</head>
+<body>
+    <h1>Upload Test</h1>
+    <input type="file" id="fileInput" accept="image/*">
+    <button onclick="testUpload()">Test Upload</button>
+    <div id="result"></div>
+
+    <script>
+        async function testUpload() {
+            const fileInput = document.getElementById('fileInput');
+            const file = fileInput.files[0];
+            
+            if (!file) {
+                document.getElementById('result').innerHTML = 'Please select a file first';
+                return;
+            }
+
+            try {
+                // Convert file to base64
+                const reader = new FileReader();
+                reader.onload = async (e) => {
+                    const base64Data = e.target.result.split(',')[1]; // Remove data:image/...;base64, prefix
+                    
+                    try {
+                        // Upload as JSON with base64 data
+                        const response = await fetch('http://localhost:3000/api/upload', {
+                            method: 'POST',
+                            headers: {
+                                'Content-Type': 'application/json',
+                            },
+                            body: JSON.stringify({
+                                image: base64Data,
+                                mimeType: file.type
+                            }),
+                        });
+
+                        if (response.ok) {
+                            const data = await response.json();
+                            document.getElementById('result').innerHTML = 
+                                '<h3>Success!</h3><pre>' + JSON.stringify(data, null, 2) + '</pre>';
+                        } else {
+                            const errorData = await response.text();
+                            document.getElementById('result').innerHTML = 
+                                '<h3>Error!</h3><p>Status: ' + response.status + '</p><pre>' + errorData + '</pre>';
+                        }
+                    } catch (error) {
+                        document.getElementById('result').innerHTML = 
+                            '<h3>Upload Error!</h3><pre>' + error.message + '</pre>';
+                    }
+                };
+                
+                reader.readAsDataURL(file);
+            } catch (error) {
+                document.getElementById('result').innerHTML = 
+                    '<h3>File Reading Error!</h3><pre>' + error.message + '</pre>';
+            }
+        }
+    </script>
+</body>
+</html>

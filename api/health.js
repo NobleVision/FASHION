@@ -2,6 +2,16 @@ const fs = require('fs')
 const { ok, fail } = require('./_lib/http')
 
 module.exports = (req, res) => {
+  // Add CORS headers
+  res.setHeader('Access-Control-Allow-Origin', '*')
+  res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS')
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type')
+
+  // Handle preflight OPTIONS request
+  if (req.method === 'OPTIONS') {
+    return res.status(200).end()
+  }
+
   try {
     // Mirrors Express implementation for API compatibility
     ok(res, {

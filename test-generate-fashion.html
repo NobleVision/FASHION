@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Test Generate Fashion</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; }
+        .test-section { margin: 20px 0; padding: 15px; border: 1px solid #ddd; border-radius: 5px; }
+        .success { background-color: #d4edda; border-color: #c3e6cb; }
+        .error { background-color: #f8d7da; border-color: #f5c6cb; }
+        .loading { background-color: #fff3cd; border-color: #ffeaa7; }
+        button { padding: 10px 20px; margin: 5px; cursor: pointer; }
+        pre { background: #f8f9fa; padding: 10px; border-radius: 3px; overflow-x: auto; }
+        img { max-width: 200px; margin: 10px; border-radius: 5px; }
+    </style>
+</head>
+<body>
+    <h1>Generate Fashion Test</h1>
+    
+    <div class="test-section">
+        <h2>Test 1: Check API Endpoints</h2>
+        <button onclick="testHealthCheck()">Test Health Check</button>
+        <button onclick="testCategories()">Test Categories</button>
+        <button onclick="testUploadedImages()">Test Uploaded Images</button>
+        <div id="endpoints-result"></div>
+    </div>
+
+    <div class="test-section">
+        <h2>Test 2: Generate Fashion Look</h2>
+        <p>This will test the generate-fashion endpoint with sample data</p>
+        <button onclick="testGenerateFashion()">Test Generate Fashion</button>
+        <div id="generate-result"></div>
+    </div>
+
+    <script>
+        const API_BASE = 'http://localhost:3000';
+
+        async function testHealthCheck() {
+            const resultDiv = document.getElementById('endpoints-result');
+            resultDiv.innerHTML = '<div class="loading">Testing health check...</div>';
+            
+            try {
+                const response = await fetch(`${API_BASE}/api/health`);
+                const data = await response.json();
+                
+                if (response.ok) {
+                    resultDiv.innerHTML = `<div class="success">✅ Health check successful<pre>${JSON.stringify(data, null, 2)}</pre></div>`;
+                } else {
+                    resultDiv.innerHTML = `<div class="error">❌ Health check failed<pre>${JSON.stringify(data, null, 2)}</pre></div>`;
+                }
+            } catch (error) {
+                resultDiv.innerHTML = `<div class="error">❌ Health check error: ${error.message}</div>`;
+            }
+        }
+
+        async function testCategories() {
+            const resultDiv = document.getElementById('endpoints-result');
+            resultDiv.innerHTML = '<div class="loading">Testing categories...</div>';
+            
+            try {
+                const response = await fetch(`${API_BASE}/api/categories`);
+                const data = await response.json();
+                
+                if (response.ok) {
+                    const totalItems = Object.values(data).reduce((sum, arr) => sum + (Array.isArray(arr) ? arr.length : 0), 0);
+                    resultDiv.innerHTML = `<div class="success">✅ Categories loaded: ${totalItems} total items<pre>${JSON.stringify(Object.keys(data), null, 2)}</pre></div>`;
+                } else {
+                    resultDiv.innerHTML = `<div class="error">❌ Categories failed<pre>${JSON.stringify(data, null, 2)}</pre></div>`;
+                }
+            } catch (error) {
+                resultDiv.innerHTML = `<div class="error">❌ Categories error: ${error.message}</div>`;
+            }
+        }
+
+        async function testUploadedImages() {
+            const resultDiv = document.getElementById('endpoints-result');
+            resultDiv.innerHTML = '<div class="loading">Testing uploaded images...</div>';
+            
+            try {
+                const response = await fetch(`${API_BASE}/api/uploaded-images`);
+                const data = await response.json();
+                
+                if (response.ok) {
+                    resultDiv.innerHTML = `<div class="success">✅ Uploaded images: ${data.images.length} found<pre>${JSON.stringify(data.images.slice(0, 3), null, 2)}</pre></div>`;
+                } else {
+                    resultDiv.innerHTML = `<div class="error">❌ Uploaded images failed<pre>${JSON.stringify(data, null, 2)}</pre></div>`;
+                }
+            } catch (error) {
+                resultDiv.innerHTML = `<div class="error">❌ Uploaded images error: ${error.message}</div>`;
+            }
+        }
+
+        async function testGenerateFashion() {
+            const resultDiv = document.getElementById('generate-result');
+            resultDiv.innerHTML = '<div class="loading">Testing fashion generation... This may take 30-60 seconds...</div>';
+            
+            try {
+                // First get some categories to use
+                const categoriesResponse = await fetch(`${API_BASE}/api/categories`);
+                const categories = await categoriesResponse.json();
+                
+                // Get uploaded images
+                const imagesResponse = await fetch(`${API_BASE}/api/uploaded-images`);
+                const images = await imagesResponse.json();
+                
+                if (!images.images || images.images.length === 0) {
+                    resultDiv.innerHTML = '<div class="error">❌ No uploaded images found. Please upload an image first.</div>';
+                    return;
+                }
+
+                // Use the first uploaded image
+                const userImageUrl = images.images[0].url;
+                
+                // Select one item from each category
+                const selectedCategories = {};
+                if (categories.accessory && categories.accessory.length > 0) {
+                    selectedCategories.accessory = categories.accessory[0].id;
+                }
+                if (categories.pose && categories.pose.length > 0) {
+                    selectedCategories.pose = categories.pose[0].id;
+                }
+                if (categories.location && categories.location.length > 0) {
+                    selectedCategories.location = categories.location[0].id;
+                }
+                if (categories.makeup && categories.makeup.length > 0) {
+                    selectedCategories.makeup = categories.makeup[0].id;
+                }
+
+                console.log('Testing with:', { userImageUrl, selectedCategories });
+
+                const response = await fetch(`${API_BASE}/api/generate-fashion`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        userImageUrl,
+                        selectedCategories
+                    }),
+                });
+
+                if (response.ok) {
+                    const data = await response.json();
+                    resultDiv.innerHTML = `
+                        <div class="success">
+                            ✅ Fashion generation successful!
+                            <div>
+                                <h4>Original Image:</h4>
+                                <img src="${userImageUrl}" alt="Original">
+                                <h4>Generated Image:</h4>
+                                <img src="${data.generatedImageUrl}" alt="Generated">
+                            </div>
+                            <pre>${JSON.stringify(data, null, 2)}</pre>
+                        </div>
+                    `;
+                } else {
+                    const errorText = await response.text();
+                    resultDiv.innerHTML = `<div class="error">❌ Fashion generation failed (${response.status})<pre>${errorText}</pre></div>`;
+                }
+            } catch (error) {
+                resultDiv.innerHTML = `<div class="error">❌ Fashion generation error: ${error.message}</div>`;
+            }
+        }
+    </script>
+</body>
+</html>

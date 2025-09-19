@@ -4,6 +4,8 @@ import toast from 'react-hot-toast'
 
 const Dashboard = () => {
   const [uploadedImage, setUploadedImage] = useState(null)
+  const [previousImages, setPreviousImages] = useState([])
+  const [showPreviousImages, setShowPreviousImages] = useState(false)
   const [categories, setCategories] = useState({
     accessory: [],
     pose: [],
@@ -11,10 +13,10 @@ const Dashboard = () => {
     makeup: []
   })
   const [selectedItems, setSelectedItems] = useState({
-    accessory: [],
-    pose: [],
-    location: [],
-    makeup: []
+    accessory: null,
+    pose: null,
+    location: null,
+    makeup: null
   })
   const [isGenerating, setIsGenerating] = useState(false)
   const [generatedImage, setGeneratedImage] = useState(null)
@@ -23,7 +25,20 @@ const Dashboard = () => {
 
   useEffect(() => {
     fetchCategories()
+    fetchPreviousImages()
   }, [])
+
+  const fetchPreviousImages = async () => {
+    try {
+      const response = await fetch(`${API_BASE}/api/uploaded-images`)
+      if (response.ok) {
+        const data = await response.json()
+        setPreviousImages(data.images || [])
+      }
+    } catch (error) {
+      console.warn('Failed to fetch previous images:', error)
+    }
+  }
 
   const fetchCategories = async () => {
     try {
@@ -73,25 +88,42 @@ const Dashboard = () => {
     const file = acceptedFiles[0]
     if (!file) return
 
-    const formData = new FormData()
-    formData.append('image', file)
-
     try {
-      const response = await fetch(`${API_BASE}/api/upload`, {
-        method: 'POST',
-        body: formData,
-      })
+      // Convert file to base64
+      const reader = new FileReader()
+      reader.onload = async (e) => {
+        const base64Data = e.target.result.split(',')[1] // Remove data:image/...;base64, prefix
 
-      if (response.ok) {
-        const data = await response.json()
-        setUploadedImage(data.url)
-        toast.success('Image uploaded successfully!')
-      } else {
-        toast.error('Failed to upload image')
+        try {
+          // Upload as JSON with base64 data
+          const response = await fetch(`http://localhost:3000/api/upload`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              image: base64Data,
+              mimeType: file.type
+            }),
+          })
+
+          if (response.ok) {
+            const data = await response.json()
+            setUploadedImage(data.url)
+            toast.success('Image uploaded successfully!')
+          } else {
+            toast.error('Failed to upload image')
+          }
+        } catch (error) {
+          console.error('Upload error:', error)
+          toast.error('Upload failed')
+        }
       }
+
+      reader.readAsDataURL(file)
     } catch (error) {
-      console.error('Upload error:', error)
-      toast.error('Upload failed')
+      console.error('File reading error:', error)
+      toast.error('Failed to read file')
     }
   }
 
@@ -106,9 +138,7 @@ const Dashboard = () => {
   const handleItemSelect = (type, itemId) => {
     setSelectedItems(prev => ({
       ...prev,
-      [type]: prev[type].includes(itemId)
-        ? prev[type].filter(id => id !== itemId)
-        : [...prev[type], itemId]
+      [type]: prev[type] === itemId ? null : itemId
     }))
   }
 
@@ -118,17 +148,28 @@ const Dashboard = () => {
       return
     }
 
+    // Server requires pose and location; enforce explicitly
+    if (!selectedItems.pose || !selectedItems.location) {
+      toast.error('Please select a Pose and a Location')
+      return
+    }
+
     setIsGenerating(true)
     try {
-      const response = await fetch('/api/generate-fashion', {
+      const payload = {
+        userImageUrl: uploadedImage,
+        poseId: selectedItems.pose,
+        locationId: selectedItems.location,
+        accessories: selectedItems.accessory ? [selectedItems.accessory] : [],
+        makeup: selectedItems.makeup ? [selectedItems.makeup] : []
+      }
+
+      const response = await fetch(`${API_BASE}/api/generate-image`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({
-          baseImageUrl: uploadedImage,
-          selectedItems
-        }),
+        body: JSON.stringify(payload),
       })
 
       if (response.ok) {
@@ -136,6 +177,8 @@ const Dashboard = () => {
         setGeneratedImage(data.imageUrl)
         toast.success('Fashion look generated!')
       } else {
+        const errorData = await response.text()
+        console.error('Generation failed:', errorData)
         toast.error('Failed to generate fashion look')
       }
     } catch (error) {
@@ -221,11 +264,11 @@ const Dashboard = () => {
             }`}
           >
             <img
-              src={item.url || 'https://via.placeholder.com/300?text=No+Image'}
+              src={item.url || 'https://placehold.co/300x200/e5e7eb/6b7280?text=No+Image'}
               alt={item.name}
               className="w-full h-24 object-cover rounded"
               onError={(e) => {
-                e.target.src = 'https://via.placeholder.com/300?text=No+Image'
+                e.target.src = 'https://placehold.co/300x200/e5e7eb/6b7280?text=No+Image'
               }}
             />
             <p className="text-sm mt-1 text-center">{item.name}</p>
@@ -255,6 +298,44 @@ const Dashboard = () => {
             <p>Drag & drop an image here, or click to select</p>
           )}
         </div>
+
+        {/* Previous Images Toggle */}
+        {previousImages.length > 0 && (
+          <div className="mt-4">
+            <button
+              onClick={() => setShowPreviousImages(!showPreviousImages)}
+              className="text-purple-600 hover:text-purple-800 text-sm font-medium"
+            >
+              {showPreviousImages ? 'Hide' : 'Show'} Previous Uploads ({previousImages.length})
+            </button>
+          </div>
+        )}
+
+        {/* Previous Images Grid */}
+        {showPreviousImages && previousImages.length > 0 && (
+          <div className="mt-4 p-4 border rounded-lg bg-gray-50">
+            <h3 className="text-sm font-medium mb-3">Select from Previous Uploads:</h3>
+            <div className="grid grid-cols-4 md:grid-cols-6 lg:grid-cols-8 gap-2">
+              {previousImages.map((image) => (
+                <div
+                  key={image.id}
+                  onClick={() => setUploadedImage(image.url)}
+                  className={`cursor-pointer border-2 rounded-lg overflow-hidden transition-all ${
+                    uploadedImage === image.url
+                      ? 'border-purple-500 ring-2 ring-purple-200'
+                      : 'border-gray-200 hover:border-gray-300'
+                  }`}
+                >
+                  <img
+                    src={image.url}
+                    alt="Previous upload"
+                    className="w-full h-16 object-cover"
+                  />
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
       </div>
 
 	      {/* Init & Seed helper when sections are empty */}
@@ -282,7 +363,7 @@ const Dashboard = () => {
             {renderCategoryGrid(
               items,
               type,
-              selectedItems[type] || [],
+              selectedItems[type] ? [selectedItems[type]] : [],
               (itemId) => handleItemSelect(type, itemId)
             )}
           </div>

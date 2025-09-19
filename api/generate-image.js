@@ -49,6 +49,8 @@ async function vertexGenerateImage(prompt) {
       }
     }
 
+    console.log(`[${new Date().toISOString()}] ▶ Vertex REST request:`, JSON.stringify(requestBody))
+
     const resp = await fetch(endpoint, {
       method: 'POST',
       headers: {
@@ -60,7 +62,7 @@ async function vertexGenerateImage(prompt) {
 
     if (!resp.ok) {
       const errBody = await resp.text().catch(() => '')
-      console.error('Vertex AI API error:', resp.status, errBody)
+      console.error(`[${new Date().toISOString()}] ❌ Vertex AI API error:`, resp.status, errBody)
       throw new Error(`Vertex AI API error: ${resp.status}`)
     }
 
@@ -71,7 +73,7 @@ async function vertexGenerateImage(prompt) {
     }
     throw new Error('No image data in response')
   } catch (error) {
-    console.error('Vertex AI generation failed:', error?.message || error)
+    console.error(`[${new Date().toISOString()}] ❌ Vertex AI generation failed:`, error?.message || error)
     return {
       success: false,
       error: 'Using fallback image',
@@ -117,12 +119,30 @@ module.exports = async (req, res) => {
       makeupDetails = q.rows
     }
 
-    // Build prompt (mirrors server/index.js)
-    const prompt = `Professional high-fashion editorial photograph. Transform the person in the reference image with these specifications:
-\nPOSE: ${pose.name} - elegant ${pose.subcategory || 'fashion pose'}\nSETTING: ${location.name} - ${location.subcategory || 'professional studio'}\n${accessoryDetails.length > 0 ? `ACCESSORIES: ${accessoryDetails.map(a => `${a.name} (${a.subcategory})`).join(', ')}` : ''}\n${makeupDetails.length > 0 ? `MAKEUP: ${makeupDetails.map(m => `${m.name} (${m.subcategory})`).join(', ')}` : ''}\n\nStyle: Ultra-high resolution, magazine quality, professional lighting, photorealistic, fashion photography, editorial style, dramatic composition, perfect styling. The model should embody confidence and elegance in the specified pose within the luxurious setting.`
+    // Build an identity-preserving prompt
+    const poseLabel = `${pose.name}${pose.subcategory ? ` (${pose.subcategory})` : ''}`
+    const locationLabel = `${location.name}${location.subcategory ? ` (${location.subcategory})` : ''}`
+    const accessoriesLabel = accessoryDetails.length > 0
+      ? accessoryDetails.map(a => `${a.name}${a.subcategory ? ` (${a.subcategory})` : ''}`).join(', ')
+      : 'none'
+    const makeupLabel = makeupDetails.length > 0
+      ? makeupDetails.map(m => `${m.name}${m.subcategory ? ` (${m.subcategory})` : ''}`).join(', ')
+      : 'none'
 
-    console.log('🎨 Generating image with Imagen 3...')
-    console.log('📝 Prompt:', prompt)
+    const prompt = `High-fashion editorial photograph of THE SAME PERSON from the reference image. Preserve the subject's identity exactly. Do not change gender, age, skin tone, hair color/style, facial structure, or body proportions. Keep the same face and body; no face replacement, no identity swap.
+
+POSE: ${poseLabel}
+LOCATION: ${locationLabel}
+ACCESSORIES: ${accessoriesLabel}
+MAKEUP: ${makeupLabel}
+
+Guidance: Photorealistic, magazine quality, professional lighting, editorial fashion. Prioritize identity preservation over styling changes. Only modify wardrobe, accessories, makeup, and background per selections. Avoid any changes to the person's identity or presentation. No cartoonish effects; keep realistic.`
+
+    const ts = new Date().toISOString()
+    console.log(`[${ts}] 🎨 Generating image with Imagen 3`)
+    console.log(`[${ts}] 👤 User image URL:`, userImageUrl || '(none)')
+    console.log(`[${ts}] 🧭 Selections -> pose: ${poseLabel}; location: ${locationLabel}; accessories: ${accessoriesLabel}; makeup: ${makeupLabel}`)
+    console.log(`[${ts}] 📝 Prompt:`, prompt)
 
     // Convert user image to base64 when provided
     let userImageBase64 = null
@@ -133,6 +153,9 @@ module.exports = async (req, res) => {
         userImageBase64 = userImageUrl.split(',')[1]
       }
     }
+    console.log(`[${new Date().toISOString()}] F Reference image base64 present:`, Boolean(userImageBase64))
+    console.log(`[${new Date().toISOString()}] 🖼️ Reference image base64 present:`, Boolean(userImageBase64))
+
 
     // Generate image via Vertex AI (userImageBase64 may be ignored by backend but kept for compatibility)
     const result = await vertexGenerateImage(prompt, userImageBase64)

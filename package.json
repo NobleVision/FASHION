@@ -4,8 +4,9 @@
   "private": true,
   "scripts": {
     "build": "npm --prefix client ci --include=dev && npm --prefix client run build",
-    "dev": "npm --prefix client run dev",
-    "dev:api": "vercel dev"
+    "dev:api": "vercel dev",
+    "audit:images": "node scripts/audit-fix-images.js --audit",
+    "fix:images": "node scripts/audit-fix-images.js --apply --mode=ai-first"
   },
   "dependencies": {
     "@google-cloud/vertexai": "^1.7.0",
