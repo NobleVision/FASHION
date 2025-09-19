@@ -1,113 +1,131 @@
-# FashionForge - AI-Powered Virtual Wardrobe Studio
+# FashionForge - Unified Vercel Serverless Architecture
 
-## Project Overview
-FashionForge is an AI-powered fashion application that allows users to upload photos and transform them using AI-generated accessories, poses, and backgrounds. Built with React frontend and Express.js backend.
+FashionForge is an AI-powered fashion application that lets users upload a photo and generate high‑fashion imagery and videos using Google Vertex AI, with assets stored on Cloudinary and metadata persisted in PostgreSQL.
 
-## Architecture
-- **Frontend**: React + Vite + Tailwind CSS on port 5000
-- **Backend**: Express.js + Node.js on port 3001
-- **Database**: PostgreSQL (Neon) for tracking images and categories
-- **Storage**: Cloudinary for image storage
-- **AI**: Google Imagen 3 for image generation, Veo 3 for video generation
+## 1) Architecture Overview
+The app now runs as a single Vercel deployment powered by serverless functions. We migrated from the previous split architecture (Express.js API on port 3001 + Vite frontend on port 5000) to a unified Vercel setup:
 
-## Recent Updates & Fixes
-- ✅ Database initialization and seeding completed successfully
-- ✅ Fixed placeholder image URL issues (switched from via.placeholder.com to placehold.co)
-- ✅ Resolved net::ERR_NAME_NOT_RESOLVED errors for category images
-- ✅ Database reset functionality added for development (`/api/reset-db` endpoint)
-- ✅ All 100 category items properly seeded with working placeholder images
-- ✅ Frontend category display fully functional with clean grid layout
+- Serverless backend: Vercel functions in `/api` (Node.js)
+- Shared runtime modules in `/api/_lib`
+- Frontend: React/Vite in `/client`
+- One deployment on Vercel: static assets and APIs are served from the same origin
 
-## Current Features
-- Fully functional category system with 100 seeded items:
-  - 40 accessories (hats, jewelry, bags, shoes)
-  - 20 poses (standing, sitting variations)
-  - 20 locations (studio, outdoor settings)
-  - 20 makeup options (eyes, lips styles)
-- Working placeholder images for all categories using placehold.co
-- Drag & drop photo upload interface with visual feedback
-- Interactive category selection grid with hover effects
-- Database integration with PostgreSQL for data persistence
-- Responsive web interface optimized for desktop and mobile
-- Real-time server health monitoring and status checks
+The legacy `/server` (Express) implementation has been retired and removed from the repository to prevent confusion. If you still see a `server` folder locally, stop any running Node processes and delete the folder (see “Locked server folder note” below).
 
-## Environment Setup
-- Uses Replit secrets for API credentials
-- Backend configured for localhost:3001
-- Frontend configured for 0.0.0.0:5000 (Replit proxy compatible)
-- Database reset endpoint available at `/api/reset-db` for development
+## 2) Project Structure
+```
+/                        # repo root
+├─ api/                  # serverless API functions (Vercel)
+│  ├─ _lib/              # shared modules
+│  │  ├─ db.js           # PostgreSQL Pool singleton (globalThis cached)
+│  │  ├─ cloudinary.js   # Cloudinary v2 config
+│  │  ├─ vertex.js       # Google Auth + Vertex AI helpers
+│  │  └─ http.js         # JSON helpers (ok/error)
+│  ├─ health.js
+│  ├─ categories/
+│  │  ├─ index.js        # GET /api/categories
+│  │  └─ [type].js       # GET /api/categories/:type
+│  ├─ upload.js          # POST /api/upload (multipart via Busboy)
+│  ├─ init-db.js         # POST /api/init-db
+│  ├─ reset-db.js        # POST /api/reset-db
+│  ├─ generate-image.js  # POST /api/generate-image (Imagen 3)
+│  ├─ generate-video.js  # POST /api/generate-video (Veo 3; graceful fallback)
+│  ├─ generations.js     # GET  /api/generations
+│  └─ save-generation.js # POST /api/save-generation
+│
+├─ client/               # React + Vite frontend
+│  ├─ src/ ...
+│  └─ vite.config.js     # dev proxy -> http://localhost:3000
+│
+├─ scripts/
+│  └─ local-verify.js    # Node script to call functions directly for smoke tests
+│
+├─ vercel.json           # build/output config (client/dist)
+└─ README.md
+```
 
-## Database Schema
-- `categories` table: stores accessories, poses, locations, makeup with placeholder URLs
-- `generations` table: tracks user creations and AI outputs
+Notes
+- The legacy `/server` directory has been removed from the repo. If a local process locked it and you still see it, stop the process and delete the folder (see Migration Notes).
 
-## Technical Details
+## 3) Development Setup
 
-### API Endpoints
-- `GET /api/health` - Server health check
-- `GET /api/categories` - Fetch all fashion categories
-- `POST /api/init-db` - Initialize database tables and seed data
-- `POST /api/reset-db` - Reset database (development only)
-- `POST /api/upload` - Handle image uploads to Cloudinary
-- `POST /api/generate` - AI image generation (Imagen 3)
-- `POST /api/generate-video` - AI video generation (Veo 3)
+### Prerequisites
+- Node 18+ (or 20+ recommended)
+- A PostgreSQL database (e.g., Neon)
+- Cloudinary account
+- Google Cloud project + Vertex AI access and a Service Account
+- Vercel CLI (optional for local dev): `npm i -g vercel` or use `npx vercel`
 
-### Port Configuration
-- **Frontend**: 5000 (Vite dev server with HMR)
-- **Backend**: 3001 (Express.js API server)
-- **Database**: PostgreSQL via Neon cloud service
+### Environment Variables (.env)
+Create a `.env` at the repo root with the following (use Vercel Project Settings in production):
 
-## Development Status
-- ✅ Project structure set up
-- ✅ Backend server running with health checks
-- ✅ Frontend React app with modern UI
-- ✅ Database schema created and seeded with 100 items
-- ✅ API endpoints for upload, generation, categories
-- ✅ Workflow configured for Replit environment
-- ✅ Frontend category display working with placeholder images
-- ✅ Image placeholder system functional (placehold.co)
-- ✅ Server health checks operational
-- ✅ Database integration fully functional
-- 🔄 AI image generation ready (quota limitations noted)
-- 🔄 Video generation integration pending
-- 🔄 User authentication system pending
-- 🔄 Gallery save/load functionality pending
+- DATABASE_URL
+- CLOUDINARY_CLOUD_NAME
+- CLOUDINARY_API_KEY
+- CLOUDINARY_API_SECRET
+- VERTEX_AI_PROJECT_ID
+- One of the following for Google credentials:
+  - GOOGLE_CREDENTIALS_JSON  (paste full JSON as a single string)
+  - or GOOGLE_APPLICATION_CREDENTIALS containing inline JSON (supported)
 
-## Setup Instructions
+### Run locally (unified serverless)
+- Build the frontend once (so Vercel can serve `client/dist`):
+  ```bash
+  npm run build
+  ```
+- Start serverless dev (APIs + static assets on the same origin):
+  ```bash
+  npm run dev   # runs `vercel dev`
+  ```
+  - Visit http://localhost:3000
+  - The frontend and all `/api/*` endpoints are served by Vercel dev
 
-1. **Install Dependencies**
-   ```bash
-   npm install
-   ```
+Optional: for React HMR, you can run Vite dev alongside Vercel dev:
+- Terminal A: `npx vercel dev` (APIs at 3000)
+- Terminal B: `cd client && npx vite` (frontend at 5000; vite.config.js proxies `/api` → 3000)
 
-2. **Environment Configuration**
-   - Set up Replit secrets or create `.env` file with required credentials
-   - Configure Google AI API key, Cloudinary credentials, and database URL
+## 4) API Endpoints (Serverless)
+- GET  `/api/health` — health/status
+- GET  `/api/categories` — list all categories grouped by type
+- GET  `/api/categories/:type` — list categories for a type (`pose|location|accessory|makeup`)
+- GET  `/api/generations` — list saved generations
+- POST `/api/init-db` — create database tables (dev convenience)
+- POST `/api/reset-db` — reset database (dev convenience)
+- POST `/api/upload` — multipart image upload to Cloudinary (field: `image`, with `type/subcategory/name`)
+- POST `/api/generate-image` — generate image via Vertex Imagen 3; uploads to Cloudinary; saves DB row
+- POST `/api/generate-video` — generate short video via Vertex Veo 3; falls back to sample video if model unavailable; updates DB row when `generationId` is provided
+- POST `/api/save-generation` — rename a generation (payload: `{ generationId, name }`)
 
-3. **Database Initialization**
-   ```bash
-   npm run db:init
-   ```
+These endpoints maintain API compatibility with the previous Express routes.
 
-4. **Start Development Servers**
-   ```bash
-   npm run dev
-   ```
-   This runs both frontend (port 5000) and backend (port 3001) concurrently
+## 5) Deployment (Vercel)
+- Connect the GitHub repo to Vercel (one project for the whole repo)
+- Project Settings → Build & Development
+  - Root Directory: leave empty (repo root)
+  - Build Command: `npm run build`
+  - Output Directory: `client/dist`
+- Set Environment Variables (same as `.env`) in Vercel → Settings → Environment Variables
+- Push to main; Vercel will build the client and deploy the serverless functions in `/api` automatically. No separate server deployment is needed.
 
-5. **Database Reset (if needed)**
-   ```bash
-   curl -X POST http://localhost:3001/api/reset-db
-   npm run db:init
-   ```
+## 6) Dependencies
+The cleaned `package.json` keeps only what the serverless architecture needs:
+- Keep: `pg`, `cloudinary`, `@google-cloud/vertexai`, `busboy`, `dotenv`, `axios`
+- Removed: `express`, `multer`, `cors`, `concurrently`, `nodemon`, `@google/generative-ai`
 
-## Recent Changes (Sept 18, 2025)
-- Database placeholder image URLs fixed and fully functional
-- All category items properly seeded and displaying correctly
-- Server stability improvements and error handling enhanced
-- Frontend category grid layout optimized for better user experience
-- Development workflow streamlined with database reset capabilities
+## 7) Migration Notes
+- The Express.js backend has been replaced by Vercel serverless functions while keeping the same API surface.
+- Ensure your `.env` (and Vercel env) are properly configured; image generation requires working Google credentials and a Vertex AI project.
+- Video generation uses Google Veo. If your project does not have access to the specified model, the endpoint responds with a graceful fallback video URL.
+- Locked server folder note: if you previously ran `npm run dev` (the old Express+Vite setup) and see the `server` folder locked on Windows, stop all Node processes first, then delete it:
+  ```powershell
+  # in PowerShell from the repo root
+  Stop-Process -Name node -Force -ErrorAction SilentlyContinue
+  Remove-Item -Recurse -Force server
+  ```
 
-
-
-
+## 8) Quick verification
+For a quick smoke test without running browsers:
+```bash
+node scripts/local-verify.js
+```
+This script calls the serverless handlers directly to validate DB init, categories, image generation, generations listing, save-generation, and video generation (with fallback if needed).
