@@ -87,3 +87,6 @@ public/uploads/
 
 
 
+
+.vercel
+.env*.local

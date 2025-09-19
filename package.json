@@ -4,7 +4,8 @@
   "private": true,
   "scripts": {
     "build": "npm --prefix client ci --include=dev && npm --prefix client run build",
-    "dev": "vercel dev"
+    "dev": "npm --prefix client run dev",
+    "dev:api": "vercel dev"
   },
   "dependencies": {
     "@google-cloud/vertexai": "^1.7.0",

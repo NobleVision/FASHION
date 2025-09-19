@@ -146,6 +146,49 @@ const Dashboard = () => {
     }
   }
 
+
+  // Initialize DB tables
+  const initDb = async () => {
+    try {
+      const resp = await fetch(`${API_BASE}/api/init-db`, { method: 'POST' })
+      if (!resp.ok) throw new Error('init-db failed')
+      toast.success('Database tables initialized')
+      await fetchCategories()
+    } catch (e) {
+      console.error('init-db error:', e)
+      toast.error('Failed to initialize DB')
+    }
+  }
+
+  // Seed defaults for the provided types (e.g., ['pose'])
+  const seedDefaults = async (types) => {
+    try {
+      const resp = await fetch(`${API_BASE}/api/seed-defaults`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ types })
+      })
+      if (!resp.ok) throw new Error('seed-defaults failed')
+      toast.success('Defaults seeded')
+      await fetchCategories()
+    } catch (e) {
+      console.error('seed-defaults error:', e)
+      toast.error('Failed to seed defaults')
+    }
+  }
+
+  // Seed for all empty sections
+  const seedAllEmpty = async () => {
+    const types = Object.entries(categories)
+      .filter(([, arr]) => !Array.isArray(arr) || arr.length === 0)
+      .map(([t]) => t)
+    if (types.length === 0) {
+      toast('No empty sections to seed')
+      return
+    }
+    await seedDefaults(types)
+  }
+
   const renderCategoryGrid = (items, type, selectedItems, onSelect) => {
     // Ensure items is always an array
     const itemsArray = Array.isArray(items) ? items : []
@@ -154,7 +197,13 @@ const Dashboard = () => {
       return (
         <div className="text-center py-8 text-gray-500">
           <p>No {type} items available.</p>
-          <p className="text-sm">Add some in the Categories page!</p>
+          <p className="text-sm mb-3">You can seed a few defaults for quick testing.</p>
+          <button
+            onClick={() => seedDefaults([type])}
+            className="bg-purple-600 text-white px-4 py-2 rounded hover:bg-purple-700"
+          >
+            Seed {type} defaults
+          </button>
         </div>
       )
     }
@@ -207,6 +256,23 @@ const Dashboard = () => {
           )}
         </div>
       </div>
+
+	      {/* Init & Seed helper when sections are empty */}
+	      {Object.values(categories).some(arr => !Array.isArray(arr) || arr.length === 0) && (
+	        <div className="mb-8 p-4 border rounded bg-yellow-50">
+	          <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
+	            <div>
+	              <h3 className="font-semibold">No items found in one or more sections</h3>
+	              <p className="text-sm text-gray-700">Initialize tables and seed sample defaults to get started.</p>
+	            </div>
+	            <div className="space-x-2">
+	              <button onClick={initDb} className="bg-gray-800 text-white px-4 py-2 rounded">Initialize Tables</button>
+	              <button onClick={seedAllEmpty} className="bg-purple-600 text-white px-4 py-2 rounded">Seed defaults for empty sections</button>
+	            </div>
+	          </div>
+	        </div>
+	      )}
+
 
       {/* Categories */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-8 mb-8">
