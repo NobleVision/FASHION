@@ -490,7 +490,8 @@ module.exports = async (req, res) => {
           if (poseRef) extraRefs.push(poseRef)
           refDebug.push(pose?.url)
         }
-        stepPrompt = `Take the person from the first image and put them in the pose shown in the second image (${poseLbl}). Preserve the person's identity, face, and body exactly. Do not alter gender, age, skin tone, hair, facial structure, or body proportions. The first image is the person to keep unchanged; any additional image(s) are pose/style references only.`
+        stepPrompt = `Start with the first image as the working canvas. Apply ONLY the requested change: put the same person into the pose shown in the second image (${poseLbl}).
+Keep the identity, face, body proportions, clothing, background/location, accessories, and makeup EXACTLY as they are in the first image. Do not remove or alter any existing elements. Do not crop. The second image is a pose reference only.`
       } else if (step === 'location') {
         const locLbl = buildLabel(location)
         if (location?.url) {
@@ -498,7 +499,8 @@ module.exports = async (req, res) => {
           if (locRef) extraRefs.push(locRef)
           refDebug.push(location?.url)
         }
-        stepPrompt = `Use the first image as the subject to keep unchanged. Place this same person in ${locLbl} using the second image as a background reference only. Keep the pose and identity unchanged. Do not modify the person's face, hair, body, or proportions. Only adjust background and lighting to match the location.`
+        stepPrompt = `Start with the first image as the working canvas. Apply ONLY the requested change: place the same person in ${locLbl}.
+Keep the identity and the current POSE exactly the same. Do not change the person's body/face/hair. Do not change clothing. Do NOT remove accessories or makeup if present. Replace only the BACKGROUND/ENVIRONMENT to match the reference, and harmonize lighting. Do not crop or reframe.`
       } else if (step === 'accessory') {
         // Choose target accessory
         let accRow = null
@@ -512,7 +514,8 @@ module.exports = async (req, res) => {
           if (accRef) extraRefs.push(accRef)
           refDebug.push(accRow?.url)
         }
-        stepPrompt = `Use the first image as the subject to keep unchanged. Using the second image only as an accessory reference, add ${accLbl} to the same person. Do not change identity, pose, location, clothing fit, or expression.`
+        stepPrompt = `Start with the first image as the working canvas. Apply ONLY the requested change: add ${accLbl} to the same person using the second image as an accessory reference.
+Keep the identity, POSE, LOCATION/BACKGROUND, clothing fit, and expression EXACTLY the same. Do not remove or alter existing accessories or makeup. No cropping.`
       } else if (step === 'makeup') {
         let mkRow = null
         if (makeupId) {
@@ -525,7 +528,8 @@ module.exports = async (req, res) => {
           if (mkRef) extraRefs.push(mkRef)
           refDebug.push(mkRow?.url)
         }
-        stepPrompt = `Use the first image as the subject to keep unchanged. Using the second image only as a makeup reference, apply ${mkLbl} to the same person. Keep everything else unchanged. Do not change identity, pose, or location.`
+        stepPrompt = `Start with the first image as the working canvas. Apply ONLY the requested change: apply ${mkLbl} using the second image as a makeup reference.
+Keep the identity, POSE, LOCATION/BACKGROUND, clothing, and any ACCESSORIES exactly the same. Do not remove hats or jewelry. Keep hair unchanged. No cropping or reframing.`
       } else {
         return res.status(400).json({ error: 'Unknown step' })
       }
