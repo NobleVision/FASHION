@@ -5,11 +5,12 @@
   "scripts": {
     "build": "npm --prefix client ci --include=dev && npm --prefix client run build",
     "dev:api": "vercel dev",
+    "check:models": "node scripts/check-vertex-models.js",
     "audit:images": "node scripts/audit-fix-images.js --audit",
     "fix:images": "node scripts/audit-fix-images.js --apply --mode=ai-first"
   },
   "dependencies": {
-    "@google-cloud/vertexai": "^1.7.0",
+    "@google-cloud/vertexai": "^1.10.0",
     "axios": "^1.12.2",
     "busboy": "^1.6.0",
     "cloudinary": "^2.5.0",

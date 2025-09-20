@@ -34,8 +34,10 @@ async function vertexGenerateImage(prompt, primaryImageBase64 = null, extraImage
   try {
     const projectId = process.env.GOOGLE_CLOUD_PROJECT_ID || process.env.VERTEX_AI_PROJECT_ID || process.env.GCP_PROJECT || process.env.PROJECT_ID || 'fashion-472519'
     const location = 'us-central1'
-    const modelId = process.env.VERTEX_IMAGE_MODEL || process.env.VTX_IMAGE_MODEL || 'imagen-3.0-generate-001'
+    const baseModelId = process.env.VERTEX_IMAGE_MODEL || process.env.VTX_IMAGE_MODEL || 'imagen-3.0-generate-001'
+    let modelId = baseModelId
     const isImagen = /^imagen/i.test(modelId)
+    let sdkLocation = process.env.VERTEX_LOCATION || process.env.GOOGLE_CLOUD_LOCATION || 'us-central1'
     const endpoint = isImagen
       ? `https://${location}-aiplatform.googleapis.com/v1/projects/${projectId}/locations/${location}/publishers/google/models/${modelId}:predict`
       : null
@@ -94,32 +96,141 @@ async function vertexGenerateImage(prompt, primaryImageBase64 = null, extraImage
 
     // If using a Gemini model (or any non-Imagen model), use the SDK request loop directly
     if (!isImagen) {
+      // Candidates to try if the requested model isn't available in this project/region yet
+      const candidates = Array.from(new Set([
+        modelId,
+        'gemini-2.5-flash-image-preview',
+        // Older preview image-capable Gemini model (fallback)
+        'gemini-2.0-flash-preview-image-generation'
+      ])).filter(m => !/^imagen/i.test(m))
+      // Gemini image-capable models are often served from the 'global' location. Try it first, then regional fallbacks.
+      const regionCandidates = Array.from(new Set([
+        sdkLocation || 'global',
+        'global',
+        'us-central1',
+        'us-east5',
+        'europe-west4'
+      ]))
+      let modelIndex = 0
+      let locIndex = 0
+      let currentLocation = regionCandidates[locIndex]
       while (true) {
         try {
           const { VertexAI } = require('@google-cloud/vertexai')
           const credentials = getCredentialsObject()
           const project = projectId
           console.log(`[${new Date().toISOString()}] ▶ Vertex SDK request`, {
-            modelId,
+          modelId: candidates[modelIndex],
             hasCreds: Boolean(credentials), project,
             hasPrimary: Boolean(primaryImageBase64),
             extraCount: Array.isArray(extraImagesBase64) ? extraImagesBase64.length : 0,
-            attempt: attempts
+            attempt: attempts,
+            sdkLocation: currentLocation
           })
-          const vertex_ai = new VertexAI({ project, location: 'us-central1', googleAuthOptions: credentials ? { credentials } : undefined })
-          const model = vertex_ai.preview.getGenerativeModel({ model: modelId })
+          const vertex_ai = new VertexAI({ project, location: currentLocation, googleAuthOptions: credentials ? { credentials } : undefined })
+          const model = vertex_ai.preview.getGenerativeModel({ model: candidates[modelIndex] })
           const parts = [{ text: prompt }]
-          if (primaryImageBase64) parts.push({ inline_data: { mime_type: 'image/png', data: primaryImageBase64 } })
-          if (Array.isArray(extraImagesBase64)) for (const b64 of extraImagesBase64) if (b64) parts.push({ inline_data: { mime_type: 'image/png', data: b64 } })
-          const request = { contents: [{ role: 'user', parts }], generation_config: { temperature: 0.4 } }
+          if (primaryImageBase64) parts.push({ inlineData: { mimeType: 'image/png', data: primaryImageBase64 } })
+          if (Array.isArray(extraImagesBase64)) for (const b64 of extraImagesBase64) if (b64) parts.push({ inlineData: { mimeType: 'image/png', data: b64 } })
+          const request = { contents: [{ role: 'user', parts }], generationConfig: { temperature: 0.4, responseModalities: ['TEXT', 'IMAGE'] } }
           const sdkResult = await model.generateContent(request)
           const sdkParts = sdkResult?.response?.candidates?.[0]?.content?.parts || []
-          const inline = sdkParts.find(p => p.inline_data)
+          const inline = sdkParts.find(p => p.inlineData || p.inline_data)
           console.log(`[${new Date().toISOString()}] ◀ Vertex SDK result`, { partsReturned: sdkParts.length, hasInline: Boolean(inline), inlineLen: inline?.inline_data?.data?.length || 0 })
-          const out = inline?.inline_data?.data
-          if (out) return { success: true, imageBase64: out, mimeType: 'image/png', messages, retryAttempts: attempts }
+          const out = (inline?.inlineData?.data) || (inline?.inline_data?.data)
+          const outMime = (inline?.inlineData?.mimeType) || (inline?.inline_data?.mime_type) || 'image/png'
+          if (out) return { success: true, imageBase64: out, mimeType: outMime, messages, retryAttempts: attempts }
         } catch (sdkErr) {
           const raw = sdkErr?.message || sdkErr
+          const code = sdkErr?.code || sdkErr?.status
+          const rawStr = typeof raw === 'string' ? raw : String(raw)
+          const notFound = /not\s*found/i.test(rawStr) || code === 404
+          const htmlResp = /<!DOCTYPE/i.test(rawStr)
+
+          // REST fallback for global location to bypass SDK routing quirks
+          if (currentLocation === 'global') {
+            try {
+              const auth = getGoogleAuth()
+              const client = await auth.getClient()
+              const { token } = await client.getAccessToken()
+
+              const restParts = [{ text: prompt }]
+              if (primaryImageBase64) restParts.push({ inline_data: { mime_type: 'image/png', data: primaryImageBase64 } })
+              if (Array.isArray(extraImagesBase64)) for (const b64 of extraImagesBase64) if (b64) restParts.push({ inline_data: { mime_type: 'image/png', data: b64 } })
+
+              const body = {
+                contents: [{ role: 'user', parts: restParts }],
+                generation_config: { temperature: 0.4, response_modalities: ['TEXT','IMAGE'] }
+              }
+              const url = `https://aiplatform.googleapis.com/v1/projects/${projectId}/locations/${currentLocation}/publishers/google/models/${candidates[modelIndex]}:generateContent`
+              const resp = await fetch(url, {
+                method: 'POST',
+                headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+                body: JSON.stringify(body)
+              })
+              const data = await resp.json().catch(() => null)
+              if (resp.ok) {
+                const prts = data?.candidates?.[0]?.content?.parts || []
+                const inline = prts.find(p => p.inline_data || p.inlineData)
+                const out = (inline?.inline_data?.data) || (inline?.inlineData?.data)
+                const outMime = (inline?.inline_data?.mime_type) || (inline?.inlineData?.mimeType) || 'image/png'
+                console.log(`[${new Date().toISOString()}] ◀ Vertex REST result`, { partsReturned: prts.length, hasInline: Boolean(inline), inlineLen: out?.length || 0, outMime })
+                if (out) return { success: true, imageBase64: out, mimeType: outMime, messages, retryAttempts: attempts }
+              } else if (resp.status === 404) {
+                const msg = `Model ${candidates[modelIndex]} not found in region ${currentLocation} (REST).`
+                messages.push(msg)
+                // Region or model fallback
+                if (locIndex < regionCandidates.length - 1) {
+                  locIndex++
+                  currentLocation = regionCandidates[locIndex]
+                  console.warn(`[${new Date().toISOString()}] 🔁 Trying region fallback: ${currentLocation}`)
+                  await new Promise(r => setTimeout(r, 200))
+                  continue
+                }
+                if (modelIndex < candidates.length - 1) {
+                  modelIndex++
+                  locIndex = 0
+                  currentLocation = regionCandidates[locIndex]
+                  console.warn(`[${new Date().toISOString()}] 🔁 Trying fallback model: ${candidates[modelIndex]} in region ${currentLocation}`)
+                  await new Promise(r => setTimeout(r, 200))
+                  continue
+                }
+                messages.push('No more Gemini image-capable model or region candidates to try. Verify model availability in your project/region or use Imagen 3.')
+                return { success: false, error: 'Using fallback image', messages, retryAttempts: attempts, fallbackUrl: 'https://images.unsplash.com/photo-1515886657613-9f3515b0c78f?w=800&q=80' }
+              } else {
+                const errMsg = data?.error?.message || data?.message || JSON.stringify(data)
+                console.warn(`[${new Date().toISOString()}] ⚠️ Vertex REST generateContent failed: ${resp.status} ${errMsg}`)
+              }
+            } catch (restErr) {
+              console.warn(`[${new Date().toISOString()}] ⚠️ Vertex REST generateContent threw:`, restErr?.message || restErr)
+            }
+          }
+
+          if (notFound || htmlResp) {
+            const triedModel = candidates[modelIndex]
+            const why = notFound ? 'not found' : 'invalid HTML response (likely wrong region)'
+            const msg = `Model ${triedModel} ${why} in region ${currentLocation}.`
+            messages.push(msg)
+            // Try next region if available
+            if (locIndex < regionCandidates.length - 1) {
+              locIndex++
+              currentLocation = regionCandidates[locIndex]
+              console.warn(`[${new Date().toISOString()}] 🔁 Trying region fallback: ${currentLocation}`)
+              await new Promise(r => setTimeout(r, 200))
+              continue
+            }
+            // Try next model candidate if available
+            if (modelIndex < candidates.length - 1) {
+              modelIndex++
+              locIndex = 0
+              currentLocation = regionCandidates[locIndex]
+              console.warn(`[${new Date().toISOString()}] 🔁 Trying fallback model: ${candidates[modelIndex]} in region ${currentLocation}`)
+              await new Promise(r => setTimeout(r, 200))
+              continue
+            }
+            messages.push('No more Gemini image-capable model or region candidates to try. Verify model availability in your project/region or use Imagen 3.')
+            return { success: false, error: 'Using fallback image', messages, retryAttempts: attempts, fallbackUrl: 'https://images.unsplash.com/photo-1515886657613-9f3515b0c78f?w=800&q=80' }
+          }
           if (isRateLimited(sdkErr?.code, raw)) {
             if (attempts < MAX_RETRIES) {
               const delaySec = Math.pow(2, attempts + 1)
@@ -137,10 +248,27 @@ async function vertexGenerateImage(prompt, primaryImageBase64 = null, extraImage
               return { success: false, error: msg, rateLimited: true, messages, retryAttempts: attempts, fallbackUrl: 'https://images.unsplash.com/photo-1515886657613-9f3515b0c78f?w=800&q=80' }
             }
           }
+
+          // If we get here, the SDK failed with a non-not-found error. Try next region/model before giving up.
           console.warn(`[${new Date().toISOString()}] ⚠️ Vertex SDK request failed:`, raw)
+          if (locIndex < regionCandidates.length - 1) {
+            locIndex++
+            currentLocation = regionCandidates[locIndex]
+            console.warn(`[${new Date().toISOString()}] 🔁 Trying region fallback: ${currentLocation}`)
+            await new Promise(r => setTimeout(r, 200))
+            continue
+          }
+          if (modelIndex < candidates.length - 1) {
+            modelIndex++
+            locIndex = 0
+            currentLocation = regionCandidates[locIndex]
+            console.warn(`[${new Date().toISOString()}] 🔁 Trying fallback model: ${candidates[modelIndex]} in region ${currentLocation}`)
+            await new Promise(r => setTimeout(r, 200))
+            continue
+          }
+          messages.push('No more Gemini image-capable model or region candidates to try. Verify model availability in your project/region or use Imagen 3.')
+          return { success: false, error: 'Using fallback image', messages, retryAttempts: attempts, fallbackUrl: 'https://images.unsplash.com/photo-1515886657613-9f3515b0c78f?w=800&q=80' }
         }
-        // If we reach here, no image and not rate-limited
-        return { success: false, error: 'Using fallback image', messages, retryAttempts: attempts, fallbackUrl: 'https://images.unsplash.com/photo-1515886657613-9f3515b0c78f?w=800&q=80' }
       }
     }
     while (true) {
@@ -248,19 +376,20 @@ async function vertexGenerateImage(prompt, primaryImageBase64 = null, extraImage
           hasCreds: Boolean(credentials), project,
           hasPrimary: Boolean(primaryImageBase64),
           extraCount: Array.isArray(extraImagesBase64) ? extraImagesBase64.length : 0,
-          attempt: attempts
+          attempt: attempts,
+          sdkLocation
         })
-        const vertex_ai = new VertexAI({ project, location: 'us-central1', googleAuthOptions: credentials ? { credentials } : undefined })
+        const vertex_ai = new VertexAI({ project, location: sdkLocation, googleAuthOptions: credentials ? { credentials } : undefined })
         const model = vertex_ai.preview.getGenerativeModel({ model: modelId })
         const parts = [{ text: prompt }]
-        if (primaryImageBase64) parts.push({ inline_data: { mime_type: 'image/png', data: primaryImageBase64 } })
-        if (Array.isArray(extraImagesBase64)) for (const b64 of extraImagesBase64) if (b64) parts.push({ inline_data: { mime_type: 'image/png', data: b64 } })
-        const request = { contents: [{ role: 'user', parts }], generation_config: { temperature: 0.4 } }
+        if (primaryImageBase64) parts.push({ inlineData: { mimeType: 'image/png', data: primaryImageBase64 } })
+        if (Array.isArray(extraImagesBase64)) for (const b64 of extraImagesBase64) if (b64) parts.push({ inlineData: { mimeType: 'image/png', data: b64 } })
+        const request = { contents: [{ role: 'user', parts }], generationConfig: { temperature: 0.4, responseMimeType: 'image/png' } }
         const sdkResult = await model.generateContent(request)
         const sdkParts = sdkResult?.response?.candidates?.[0]?.content?.parts || []
-        const inline = sdkParts.find(p => p.inline_data)
-        console.log(`[${new Date().toISOString()}] ◀ Vertex SDK result`, { partsReturned: sdkParts.length, hasInline: Boolean(inline), inlineLen: inline?.inline_data?.data?.length || 0 })
-        const out = inline?.inline_data?.data
+        const inline = sdkParts.find(p => p.inlineData || p.inline_data)
+        console.log(`[${new Date().toISOString()}] ◀ Vertex SDK result`, { partsReturned: sdkParts.length, hasInline: Boolean(inline), inlineLen: (inline?.inlineData?.data?.length || inline?.inline_data?.data?.length || 0) })
+        const out = (inline?.inlineData?.data) || (inline?.inline_data?.data)
         if (out) return { success: true, imageBase64: out, mimeType: 'image/png', messages, retryAttempts: attempts }
       } catch (sdkErr) {
         const raw = sdkErr?.message || sdkErr
