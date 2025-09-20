@@ -81,10 +81,11 @@ module.exports = async (req, res) => {
         const prompt = `High-quality product thumbnail for fashion ${type}: ${label}. Crisp, neutral studio background, centered subject, well-lit, photorealistic. Avoid text and logos. 1:1 aspect.`
         const result = await vertexGenerateImage(prompt)
         let finalUrl
+        const folder = `fashionforge/${type}`
         if (result.success) {
-          finalUrl = await uploadBase64ToCloudinary(result.imageBase64, result.mimeType)
+          finalUrl = await uploadBase64ToCloudinary(result.imageBase64, result.mimeType, folder)
         } else {
-          try { const resp = await fetch(result.fallbackUrl); const buf = await resp.arrayBuffer(); const b64 = Buffer.from(buf).toString('base64'); finalUrl = await uploadBase64ToCloudinary(b64, 'image/jpeg') } catch { finalUrl = result.fallbackUrl }
+          try { const resp = await fetch(result.fallbackUrl); const buf = await resp.arrayBuffer(); const b64 = Buffer.from(buf).toString('base64'); finalUrl = await uploadBase64ToCloudinary(b64, 'image/jpeg', folder) } catch { finalUrl = result.fallbackUrl }
         }
         await pool.query('UPDATE categories SET url = $1 WHERE id = $2 AND type = $3', [finalUrl, item.id, type])
         results.push({ id: item.id, url: finalUrl, rateLimited: Boolean(result.rateLimited), retryAttempts: result.retryAttempts || 0 })

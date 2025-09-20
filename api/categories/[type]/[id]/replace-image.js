@@ -29,8 +29,8 @@ module.exports = async (req, res) => {
     const cloudinary = getCloudinary()
     const dataUri = `data:${mimeType || 'image/jpeg'};base64,${image}`
 
-    // Upload to Cloudinary under folder
-    const folder = 'fashionforge'
+    // Upload to Cloudinary under category-specific folder
+    const folder = `fashionforge/${type}`
     const result = await new Promise((resolve, reject) => {
       cloudinary.uploader.upload(
         dataUri,

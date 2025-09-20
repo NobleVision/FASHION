@@ -164,15 +164,16 @@ module.exports = async (req, res) => {
 
     const result = await vertexGenerateImage(prompt)
     let finalUrl
+    const folder = `fashionforge/${type}`
     if (result.success) {
-      finalUrl = await uploadBase64ToCloudinary(result.imageBase64, result.mimeType)
+      finalUrl = await uploadBase64ToCloudinary(result.imageBase64, result.mimeType, folder)
     } else {
       // Upload fallback to Cloudinary to standardize storage
       try {
         const resp = await fetch(result.fallbackUrl)
         const buf = await resp.arrayBuffer()
         const b64 = Buffer.from(buf).toString('base64')
-        finalUrl = await uploadBase64ToCloudinary(b64, 'image/jpeg')
+        finalUrl = await uploadBase64ToCloudinary(b64, 'image/jpeg', folder)
       } catch {
         finalUrl = result.fallbackUrl
       }

@@ -34,7 +34,11 @@ async function vertexGenerateImage(prompt, primaryImageBase64 = null, extraImage
   try {
     const projectId = process.env.GOOGLE_CLOUD_PROJECT_ID || process.env.VERTEX_AI_PROJECT_ID || process.env.GCP_PROJECT || process.env.PROJECT_ID || 'fashion-472519'
     const location = 'us-central1'
-    const endpoint = `https://${location}-aiplatform.googleapis.com/v1/projects/${projectId}/locations/${location}/publishers/google/models/imagen-3.0-generate-001:predict`
+    const modelId = process.env.VERTEX_IMAGE_MODEL || process.env.VTX_IMAGE_MODEL || 'imagen-3.0-generate-001'
+    const isImagen = /^imagen/i.test(modelId)
+    const endpoint = isImagen
+      ? `https://${location}-aiplatform.googleapis.com/v1/projects/${projectId}/locations/${location}/publishers/google/models/${modelId}:predict`
+      : null
 
     // Build a flexible instance that includes commonly recognized fields for image-to-image
     const instance = { prompt }
@@ -68,6 +72,8 @@ async function vertexGenerateImage(prompt, primaryImageBase64 = null, extraImage
       }
     }
 
+    console.log(`[${new Date().toISOString()}] 🧠 Vertex model selected: ${modelId} (${isImagen ? 'REST Imagen path' : 'SDK generative path'})`)
+
     const MAX_RETRIES = 3
     const messages = []
     const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
@@ -85,6 +91,58 @@ async function vertexGenerateImage(prompt, primaryImageBase64 = null, extraImage
     }
 
     let attempts = 0
+
+    // If using a Gemini model (or any non-Imagen model), use the SDK request loop directly
+    if (!isImagen) {
+      while (true) {
+        try {
+          const { VertexAI } = require('@google-cloud/vertexai')
+          const credentials = getCredentialsObject()
+          const project = projectId
+          console.log(`[${new Date().toISOString()}] ▶ Vertex SDK request`, {
+            modelId,
+            hasCreds: Boolean(credentials), project,
+            hasPrimary: Boolean(primaryImageBase64),
+            extraCount: Array.isArray(extraImagesBase64) ? extraImagesBase64.length : 0,
+            attempt: attempts
+          })
+          const vertex_ai = new VertexAI({ project, location: 'us-central1', googleAuthOptions: credentials ? { credentials } : undefined })
+          const model = vertex_ai.preview.getGenerativeModel({ model: modelId })
+          const parts = [{ text: prompt }]
+          if (primaryImageBase64) parts.push({ inline_data: { mime_type: 'image/png', data: primaryImageBase64 } })
+          if (Array.isArray(extraImagesBase64)) for (const b64 of extraImagesBase64) if (b64) parts.push({ inline_data: { mime_type: 'image/png', data: b64 } })
+          const request = { contents: [{ role: 'user', parts }], generation_config: { temperature: 0.4 } }
+          const sdkResult = await model.generateContent(request)
+          const sdkParts = sdkResult?.response?.candidates?.[0]?.content?.parts || []
+          const inline = sdkParts.find(p => p.inline_data)
+          console.log(`[${new Date().toISOString()}] ◀ Vertex SDK result`, { partsReturned: sdkParts.length, hasInline: Boolean(inline), inlineLen: inline?.inline_data?.data?.length || 0 })
+          const out = inline?.inline_data?.data
+          if (out) return { success: true, imageBase64: out, mimeType: 'image/png', messages, retryAttempts: attempts }
+        } catch (sdkErr) {
+          const raw = sdkErr?.message || sdkErr
+          if (isRateLimited(sdkErr?.code, raw)) {
+            if (attempts < MAX_RETRIES) {
+              const delaySec = Math.pow(2, attempts + 1)
+              const msg = attempts === 0
+                ? `API rate limit reached. Pausing for ${delaySec} seconds before retry (attempt 1 of ${MAX_RETRIES})...`
+                : `Still rate limited. Waiting ${delaySec} seconds before retry (attempt ${attempts + 1} of ${MAX_RETRIES})...`
+              messages.push(msg)
+              console.warn(`[${new Date().toISOString()}] ⏳ ${msg}`)
+              await sleep(delaySec * 1000)
+              attempts++
+              continue
+            } else {
+              const msg = 'Rate limit exceeded. Please try again in a few minutes.'
+              console.error(`[${new Date().toISOString()}] ❌ ${msg}`)
+              return { success: false, error: msg, rateLimited: true, messages, retryAttempts: attempts, fallbackUrl: 'https://images.unsplash.com/photo-1515886657613-9f3515b0c78f?w=800&q=80' }
+            }
+          }
+          console.warn(`[${new Date().toISOString()}] ⚠️ Vertex SDK request failed:`, raw)
+        }
+        // If we reach here, no image and not rate-limited
+        return { success: false, error: 'Using fallback image', messages, retryAttempts: attempts, fallbackUrl: 'https://images.unsplash.com/photo-1515886657613-9f3515b0c78f?w=800&q=80' }
+      }
+    }
     while (true) {
       // Acquire a fresh access token for each attempt
       const auth = getGoogleAuth()
@@ -92,6 +150,7 @@ async function vertexGenerateImage(prompt, primaryImageBase64 = null, extraImage
       const { token } = await client.getAccessToken()
 
       console.log(`[${new Date().toISOString()}] ▶ Vertex REST request`, {
+        modelId,
         projectId,
         hasPrimary: Boolean(primaryImageBase64),
         extraCount: Array.isArray(extraImagesBase64) ? extraImagesBase64.length : 0,
@@ -192,7 +251,7 @@ async function vertexGenerateImage(prompt, primaryImageBase64 = null, extraImage
           attempt: attempts
         })
         const vertex_ai = new VertexAI({ project, location: 'us-central1', googleAuthOptions: credentials ? { credentials } : undefined })
-        const model = vertex_ai.preview.getGenerativeModel({ model: 'imagen-3.0-generate-001' })
+        const model = vertex_ai.preview.getGenerativeModel({ model: modelId })
         const parts = [{ text: prompt }]
         if (primaryImageBase64) parts.push({ inline_data: { mime_type: 'image/png', data: primaryImageBase64 } })
         if (Array.isArray(extraImagesBase64)) for (const b64 of extraImagesBase64) if (b64) parts.push({ inline_data: { mime_type: 'image/png', data: b64 } })
@@ -365,11 +424,13 @@ module.exports = async (req, res) => {
 
       const stepResult = await vertexGenerateImage(stepPrompt, inputBase64, extraRefs)
       let stepUrl
+      // Save step outputs into category-specific folders to avoid polluting general uploads
+      const stepFolder = `fashionforge/${step}`
       if (stepResult.success) {
-        stepUrl = await uploadBase64ToCloudinary(stepResult.imageBase64, stepResult.mimeType)
+        stepUrl = await uploadBase64ToCloudinary(stepResult.imageBase64, stepResult.mimeType, stepFolder)
       } else {
         const fb = await imageUrlToBase64(stepResult.fallbackUrl)
-        stepUrl = fb ? await uploadBase64ToCloudinary(fb, 'image/jpeg') : stepResult.fallbackUrl
+        stepUrl = fb ? await uploadBase64ToCloudinary(fb, 'image/jpeg', stepFolder) : stepResult.fallbackUrl
       }
 
       return ok(res, { imageUrl: stepUrl, step, prompt: stepPrompt, messages: stepResult.messages || [], retryAttempts: stepResult.retryAttempts || 0, rateLimited: Boolean(stepResult.rateLimited) })
@@ -422,14 +483,15 @@ Guidance: Photorealistic, magazine quality, professional lighting, editorial fas
     let errorMessage = null
 
     if (result.success) {
-      finalImageUrl = await uploadBase64ToCloudinary(result.imageBase64, result.mimeType)
+      // Store final generated images in a dedicated folder separate from user uploads
+      finalImageUrl = await uploadBase64ToCloudinary(result.imageBase64, result.mimeType, 'fashionforge/generated')
       console.log('✅ Image generated and uploaded successfully')
     } else {
       // Upload fallback image to Cloudinary as well
       try {
         const fallbackBase64 = await imageUrlToBase64(result.fallbackUrl)
         if (fallbackBase64) {
-          finalImageUrl = await uploadBase64ToCloudinary(fallbackBase64, 'image/jpeg')
+          finalImageUrl = await uploadBase64ToCloudinary(fallbackBase64, 'image/jpeg', 'fashionforge/generated')
           console.log('✅ Fallback image uploaded to Cloudinary')
         } else {
           finalImageUrl = result.fallbackUrl
