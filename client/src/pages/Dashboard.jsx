@@ -39,6 +39,7 @@ const Dashboard = () => {
   // Inline and toastable messages for rate limiting/retries
   const [stepMessages, setStepMessages] = useState([])
   const [stepRateLimited, setStepRateLimited] = useState(false)
+  const [autoApprove, setAutoApprove] = useState(true)
 
   // Bulk selection and per-item loading for category management
   const [bulkSelected, setBulkSelected] = useState({ accessory: [], pose: [], location: [], makeup: [] })
@@ -399,8 +400,10 @@ const Dashboard = () => {
       setCurrentStep(step)
       if (data.prompt) setStepPrompts(prev => ({ ...prev, [step]: data.prompt }))
 
-      // Auto-approve and continue to the next step
-      await autoAdvanceFromStep(step, data.imageUrl, data.prompt)
+      // Auto-approve and continue to the next step (if enabled)
+      if (autoApprove) {
+        await autoAdvanceFromStep(step, data.imageUrl, data.prompt)
+      }
       return data.imageUrl
     } catch (e) {
       console.error('callStep error', e)
@@ -459,8 +462,10 @@ const Dashboard = () => {
       setCurrentStep(step)
       if (data.prompt) setStepPrompts(prev => ({ ...prev, [step]: data.prompt }))
 
-      // Auto-approve and continue to the next step
-      await autoAdvanceFromStep(step, data.imageUrl, data.prompt)
+      // Auto-approve and continue to the next step (if enabled)
+      if (autoApprove) {
+        await autoAdvanceFromStep(step, data.imageUrl, data.prompt)
+      }
       return data.imageUrl
     } catch (e) {
       console.error('callStep error', e)
@@ -1031,6 +1036,10 @@ const Dashboard = () => {
               <input type="checkbox" checked={stepMode} onChange={(e) => setStepMode(e.target.checked)} />
               Step-by-step mode (Beta)
             </label>
+            <label className="flex items-center gap-2 text-sm text-gray-700">
+              <input type="checkbox" checked={autoApprove} onChange={(e) => setAutoApprove(e.target.checked)} />
+              Auto-approve each step
+            </label>
             <button
               onClick={startStepByStep}
               disabled={!stepMode || !uploadedImage || stepLoading}
@@ -1041,7 +1050,7 @@ const Dashboard = () => {
           </div>
 
           {(currentStep || stepPreviewUrl || chain.pose || chain.location || chain.accessory || chain.makeup) && (
-            <div className="w-full md:w-2/3 mt-4 text-left">
+            <div className="w-full max-w-6xl mx-auto mt-4 text-left">
               {/* Progress */}
               <div className="flex items-center gap-3 mb-3">
                 {['pose','location','accessory','makeup'].map((s) => (
@@ -1049,6 +1058,12 @@ const Dashboard = () => {
                     chain[s] ? 'bg-green-50 text-green-700 border-green-300' : (currentStep===s ? 'bg-yellow-50 text-yellow-700 border-yellow-300' : 'bg-gray-50 text-gray-500 border-gray-300')
                   }`}>
                     {s}
+                    {/* Re-apply */}
+                    {chain.pose && (
+                      <div className="mt-2">
+                        <button className="text-[11px] underline" onClick={() => restartFrom('pose')}>Re-apply Pose</button>
+                      </div>
+                    )}
                   </div>
                 ))}
               </div>
@@ -1060,14 +1075,14 @@ const Dashboard = () => {
                   {/* Original */}
                   <div className="min-w-[160px] text-center">
                     <div className="text-xs font-medium mb-1">Original</div>
-                    <img src={chain.base || uploadedImage} alt="Original" className="w-32 h-32 object-cover rounded border" />
+                    <img src={chain.base || uploadedImage} alt="Original" className="w-40 h-40 object-cover rounded border" />
                     <div className="mt-1 text-[10px] text-gray-500">Uploaded image</div>
                   </div>
 
                   {/* After Pose */}
                   <div className="min-w-[200px] text-center">
                     <div className="text-xs font-medium mb-1">{`After Pose${(!chain.pose && currentStep==='pose' && stepPreviewUrl) ? ' (preview)' : ''}`}</div>
-                    <img src={(chain.pose || (currentStep==='pose' ? stepPreviewUrl : null)) || 'https://placehold.co/128x128/e5e7eb/6b7280?text=Pending'} alt="After Pose" className="w-32 h-32 object-cover rounded border mx-auto" />
+                    <img src={(chain.pose || (currentStep==='pose' ? stepPreviewUrl : null)) || 'https://placehold.co/128x128/e5e7eb/6b7280?text=Pending'} alt="After Pose" className="w-40 h-40 object-cover rounded border mx-auto" />
                     {/* Reference thumbnail */}
                     {(() => { const ref = (categories.pose || []).find(i => String(i.id) === String(selectedItems.pose)); return ref ? (
                       <div className="mt-2 text-[10px] text-gray-600">
@@ -1077,6 +1092,11 @@ const Dashboard = () => {
                     ) : null })()}
                     {(chain.pose ? chainPrompts.pose : (currentStep==='pose' ? stepPrompts.pose : null)) && (
                       <div className="mt-1 text-[10px] text-gray-600 whitespace-pre-wrap break-words text-left">{(chain.pose ? chainPrompts.pose : stepPrompts.pose)}</div>
+                    )}
+                    {chain.pose && (
+                      <div className="mt-2">
+                        <button className="text-[11px] underline" onClick={() => restartFrom('pose')}>Re-apply Pose</button>
+                      </div>
                     )}
 
                     {/* Retry / rate-limit inline notices */}
@@ -1100,7 +1120,7 @@ const Dashboard = () => {
                   {/* After Location */}
                   <div className="min-w-[200px] text-center">
                     <div className="text-xs font-medium mb-1">{`After Location${(!chain.location && currentStep==='location' && stepPreviewUrl) ? ' (preview)' : ''}`}</div>
-                    <img src={(chain.location || (currentStep==='location' ? stepPreviewUrl : null)) || 'https://placehold.co/128x128/e5e7eb/6b7280?text=Pending'} alt="After Location" className="w-32 h-32 object-cover rounded border mx-auto" />
+                    <img src={(chain.location || (currentStep==='location' ? stepPreviewUrl : null)) || 'https://placehold.co/128x128/e5e7eb/6b7280?text=Pending'} alt="After Location" className="w-40 h-40 object-cover rounded border mx-auto" />
                     {(() => { const ref = (categories.location || []).find(i => String(i.id) === String(selectedItems.location)); return ref ? (
                       <div className="mt-2 text-[10px] text-gray-600">
                         <div className="mb-1">Using:</div>
@@ -1110,12 +1130,17 @@ const Dashboard = () => {
                     {(chain.location ? chainPrompts.location : (currentStep==='location' ? stepPrompts.location : null)) && (
                       <div className="mt-1 text-[10px] text-gray-600 whitespace-pre-wrap break-words text-left">{(chain.location ? chainPrompts.location : stepPrompts.location)}</div>
                     )}
+                    {chain.location && (
+                      <div className="mt-2">
+                        <button className="text-[11px] underline" onClick={() => restartFrom('location')}>Re-apply Location</button>
+                      </div>
+                    )}
                   </div>
 
                   {/* After Accessory */}
                   <div className="min-w-[200px] text-center">
                     <div className="text-xs font-medium mb-1">{`After Accessory${(!chain.accessory && currentStep==='accessory' && stepPreviewUrl) ? ' (preview)' : ''}`}</div>
-                    <img src={(chain.accessory || (currentStep==='accessory' ? stepPreviewUrl : null)) || 'https://placehold.co/128x128/e5e7eb/6b7280?text=Pending'} alt="After Accessory" className="w-32 h-32 object-cover rounded border mx-auto" />
+                    <img src={(chain.accessory || (currentStep==='accessory' ? stepPreviewUrl : null)) || 'https://placehold.co/128x128/e5e7eb/6b7280?text=Pending'} alt="After Accessory" className="w-40 h-40 object-cover rounded border mx-auto" />
                     {(() => { const ref = selectedItems.accessory ? (categories.accessory || []).find(i => String(i.id) === String(selectedItems.accessory)) : null; return ref ? (
                       <div className="mt-2 text-[10px] text-gray-600">
                         <div className="mb-1">Using:</div>
@@ -1125,12 +1150,17 @@ const Dashboard = () => {
                     {(chain.accessory ? chainPrompts.accessory : (currentStep==='accessory' ? stepPrompts.accessory : null)) && (
                       <div className="mt-1 text-[10px] text-gray-600 whitespace-pre-wrap break-words text-left">{(chain.accessory ? chainPrompts.accessory : stepPrompts.accessory)}</div>
                     )}
+                    {chain.accessory && (
+                      <div className="mt-2">
+                        <button className="text-[11px] underline" onClick={() => restartFrom('accessory')}>Re-apply Accessory</button>
+                      </div>
+                    )}
                   </div>
 
                   {/* After Makeup */}
                   <div className="min-w-[200px] text-center">
                     <div className="text-xs font-medium mb-1">{`After Makeup${(!chain.makeup && currentStep==='makeup' && stepPreviewUrl) ? ' (preview)' : ''}`}</div>
-                    <img src={(chain.makeup || (currentStep==='makeup' ? stepPreviewUrl : null)) || 'https://placehold.co/128x128/e5e7eb/6b7280?text=Pending'} alt="After Makeup" className="w-32 h-32 object-cover rounded border mx-auto" />
+                    <img src={(chain.makeup || (currentStep==='makeup' ? stepPreviewUrl : null)) || 'https://placehold.co/128x128/e5e7eb/6b7280?text=Pending'} alt="After Makeup" className="w-40 h-40 object-cover rounded border mx-auto" />
                     {(() => { const ref = selectedItems.makeup ? (categories.makeup || []).find(i => String(i.id) === String(selectedItems.makeup)) : null; return ref ? (
                       <div className="mt-2 text-[10px] text-gray-600">
                         <div className="mb-1">Using:</div>
@@ -1139,6 +1169,11 @@ const Dashboard = () => {
                     ) : null })()}
                     {(chain.makeup ? chainPrompts.makeup : (currentStep==='makeup' ? stepPrompts.makeup : null)) && (
                       <div className="mt-1 text-[10px] text-gray-600 whitespace-pre-wrap break-words text-left">{(chain.makeup ? chainPrompts.makeup : stepPrompts.makeup)}</div>
+                    )}
+                    {chain.makeup && (
+                      <div className="mt-2">
+                        <button className="text-[11px] underline" onClick={() => restartFrom('makeup')}>Re-apply Makeup</button>
+                      </div>
                     )}
                   </div>
                 </div>

@@ -30,41 +30,40 @@ async function uploadBase64VideoToCloudinary(base64Data, mimeType = 'video/mp4',
 }
 
 async function vertexGenerateVideo(imageBase64, prompt, plan = 'fast') {
-  // Attempt a REST call to Veo 3; prefer a cost-optimized/fast tier when available.
+  // REST call to Veo. Prefer fast/economy when available. Allow env overrides.
   try {
     const auth = getGoogleAuth()
     const client = await auth.getClient()
     const { token } = await client.getAccessToken()
-    const projectId = process.env.VERTEX_AI_PROJECT_ID || 'fashion-472519'
-    const location = 'us-central1'
+    const projectId = process.env.VERTEX_AI_PROJECT_ID || process.env.GOOGLE_CLOUD_PROJECT_ID || 'fashion-472519'
+    const location = process.env.VERTEX_VIDEO_LOCATION || 'us-central1'
 
-    // Try fast/economy first (if unsupported, we fall back to standard)
-    const modelAttempts = [
-      // Hypothetical fast/economy variants first
-      `projects/${projectId}/locations/${location}/publishers/google/models/veo-3.0-fast-generate-preview`,
-      `projects/${projectId}/locations/${location}/publishers/google/models/veo-2.0-fast-generate-001`,
-      // Standard models
-      `projects/${projectId}/locations/${location}/publishers/google/models/veo-3.0-generate-preview`,
-      `projects/${projectId}/locations/${location}/publishers/google/models/veo-2.0-generate-001`,
-      // Legacy catch-all
-      `projects/${projectId}/locations/${location}/publishers/google/models/veo-3.0`
-    ]
+    const primaryModel = process.env.VERTEX_VIDEO_MODEL // e.g. "veo-3.0-generate-preview" or "veo-3.0-fast-generate-preview"
+    const mk = (m) => m && `projects/${projectId}/locations/${location}/publishers/google/models/${m}`
+
+    // Known-good candidates. Avoid non-existent catch-alls.
+    const modelAttempts = Array.from(new Set([
+      mk(primaryModel),
+      mk('veo-3.0-fast-generate-preview'),
+      mk('veo-3.0-generate-preview'),
+      // Older 2.x only as last resort (some projects may still have access)
+      mk('veo-2.0-generate-001')
+    ].filter(Boolean)))
 
     const commonParameters = {
       output_mime_type: 'video/mp4',
       sampleCount: 1,
       durationSeconds: 5,
-      // Hints for economical tier (if the backend honors them)
+      // Hints for economical tier (ignored if unsupported)
       preset: plan === 'fast' ? 'economy' : 'standard',
-      plan: plan,
+      plan,
       mode: plan === 'fast' ? 'FAST' : 'STANDARD'
     }
 
     const requestBody = (parametersOverride = {}) => ({
       instances: [{
         prompt,
-        // Some Veo endpoints accept an inline base64 image under a field like "image" or "input_image".
-        // We provide both; unsupported fields will be ignored by the backend.
+        // Some endpoints accept either field name; harmless if ignored.
         image: imageBase64,
         input_image: imageBase64
       }],
@@ -86,14 +85,28 @@ async function vertexGenerateVideo(imageBase64, prompt, plan = 'fast') {
         if (pred?.bytesBase64Encoded) {
           return { success: true, videoBase64: pred.bytesBase64Encoded, mimeType: pred.mimeType || 'video/mp4' }
         }
-        // Some endpoints may return a different field name
         if (pred?.videoBytesBase64) {
           return { success: true, videoBase64: pred.videoBytesBase64, mimeType: pred.mimeType || 'video/mp4' }
         }
       } else {
-        const errBody = await resp.text().catch(() => '')
-        lastErrText = `${resp.status} ${errBody}`
+        let errJson = null
+        try { errJson = await resp.json() } catch { /* ignore */ }
+        const errMsg = errJson?.error?.message || (await resp.text().catch(() => '')) || ''
+        const errCode = errJson?.error?.code || resp.status
+        const errStatus = errJson?.error?.status || ''
+        lastErrText = `${errCode} ${errStatus} ${errMsg}`.trim()
         console.warn(`[Veo] Model attempt failed: ${modelPath} -> ${lastErrText}`)
+
+        // If quota exhausted, no point in trying other variants of same base model.
+        if (errCode === 429 || /RESOURCE_EXHAUSTED/i.test(errStatus)) {
+          return {
+            success: false,
+            error: 'QUOTA_EXHAUSTED: Veo video quota is not provisioned or is depleted. Request quota for veo-3.0-generate-preview in us-central1.',
+            details: lastErrText,
+            fallbackUrl: 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4'
+          }
+        }
+        // If not found, continue to next candidate.
         continue
       }
     }

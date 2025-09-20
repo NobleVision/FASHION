@@ -12,6 +12,15 @@ The app now runs as a single Vercel deployment powered by serverless functions. 
 
 The legacy `/server` (Express) implementation has been retired and removed from the repository to prevent confusion. If you still see a `server` folder locally, stop any running Node processes and delete the folder (see “Locked server folder note” below).
 
+## Recent Highlights
+
+- Unified Vercel serverless backend; legacy Express removed
+- Step-by-step image generation flow (pose → location → accessory → makeup) with identity preservation and reference conditioning
+- Gemini 2.5 Flash Image Preview supported in locations/global, with REST fallback; Imagen 3 used as stable default in us-central1
+- Veo 3 video generation added with env-configurable model/region and graceful fallback; clearer diagnostics for 429/404
+- Category UI now displays DB-backed thumbnails with robust placeholders/fallbacks
+- Local development via `vercel dev` and a single Vercel deployment for app + APIs
+
 ## 2) Project Structure
 ```
 /                        # repo root
@@ -57,16 +66,124 @@ Notes
 - Vercel CLI (optional for local dev): `npm i -g vercel` or use `npx vercel`
 
 ### Environment Variables (.env)
-Create a `.env` at the repo root with the following (use Vercel Project Settings in production):
+Create a `.env` at the repo root. In production, set these in Vercel → Project → Settings → Environment Variables.
 
+Required
 - DATABASE_URL
+
+Cloudinary
 - CLOUDINARY_CLOUD_NAME
 - CLOUDINARY_API_KEY
 - CLOUDINARY_API_SECRET
-- VERTEX_AI_PROJECT_ID
-- One of the following for Google credentials:
-  - GOOGLE_CREDENTIALS_JSON  (paste full JSON as a single string)
-  - or GOOGLE_APPLICATION_CREDENTIALS containing inline JSON (supported)
+
+Google Cloud / Vertex AI
+- VERTEX_AI_PROJECT_ID (or GOOGLE_CLOUD_PROJECT_ID)
+- VERTEX_LOCATION (default: us-central1; use `global` for Gemini preview image models)
+- VERTEX_IMAGE_MODEL (default: `imagen-3.0-generate-001`; optional: `gemini-2.5-flash-image-preview`)
+- VERTEX_VIDEO_MODEL (e.g., `veo-3.0-generate-preview` or `veo-3.0-fast-generate-preview`)
+- VERTEX_VIDEO_LOCATION (default: `us-central1`)
+
+Credentials (choose one)
+- GOOGLE_CREDENTIALS_JSON (inline JSON string or base64-encoded JSON)
+- GOOGLE_APPLICATION_CREDENTIALS (inline JSON OR absolute file path)
+Also supported: GOOGLE_APPLICATION_JSON, GCP_SERVICE_ACCOUNT_JSON, GCLOUD_SERVICE_ACCOUNT_JSON
+
+Example
+```bash
+DATABASE_URL=postgres://user:pass@host:5432/db
+
+CLOUDINARY_CLOUD_NAME=...
+CLOUDINARY_API_KEY=...
+CLOUDINARY_API_SECRET=...
+
+VERTEX_AI_PROJECT_ID=fashion-472519
+VERTEX_LOCATION=us-central1
+VERTEX_IMAGE_MODEL=imagen-3.0-generate-001
+
+VERTEX_VIDEO_MODEL=veo-3.0-generate-preview
+VERTEX_VIDEO_LOCATION=us-central1
+
+# One of these:
+GOOGLE_CREDENTIALS_JSON={"type":"service_account",...}
+# or
+GOOGLE_APPLICATION_CREDENTIALS=C:\\path\\to\\service-account.json
+```
+
+## 4a) Image Generation – Step-by-step flow & identity preservation
+
+The image pipeline supports two modes via `POST /api/generate-image`:
+
+- Step mode (recommended for UX): perform one transformation at a time in the sequence pose → location → accessory → makeup. Each step:
+  - Uses the previous image as input (`inputImageUrl`),
+  - Optionally includes a category reference image (e.g., the selected pose image) as a secondary reference,
+  - Adds the original user image as an identity anchor so the face/body remain the same,
+  - Uploads the result to Cloudinary and returns the new URL.
+
+- Full compose mode: generate a final image in one shot from `poseId`, `locationId`, `accessories[]`, `makeup[]`, preserving identity.
+
+Models
+- Default image model: `imagen-3.0-generate-001` (region: `us-central1`)
+- Gemini option for step mode: `gemini-2.5-flash-image-preview` (region: `global`) with REST fallback when SDK routing fails
+
+Minimal example (step mode)
+```bash
+curl -X POST http://localhost:3000/api/generate-image \
+  -H "Content-Type: application/json" \
+  -d '{
+    "step": "pose",
+    "inputImageUrl": "<previous_or_user_image_url>",
+    "userImageUrl": "<original_user_image_url>",
+    "poseId": 123
+  }'
+```
+
+Notes
+- The backend automatically includes helpful reference fields for different providers (e.g., `image`, `input_image`, `inlineData`) and normalizes the returned bytes.
+- Rate limits are handled with exponential backoff; on persistent failure, a clear message is returned with a safe fallback image.
+
+## 4b) Video Generation (Veo 3) – Setup & Troubleshooting
+
+Endpoint: `POST /api/generate-video`
+- Input: `{ imageUrl: string, customPrompt?: string, generationId?: string, plan?: 'fast'|'standard' }`
+- Output: uploads generated video to Cloudinary (mp4) and returns the URL; falls back to a sample video if Veo is unavailable.
+
+Environment variables
+- `VERTEX_VIDEO_MODEL` (choose one): `veo-3.0-generate-preview` or `veo-3.0-fast-generate-preview`
+- `VERTEX_VIDEO_LOCATION`: `us-central1`
+
+Quota requirements (Google Cloud)
+- Veo 3 requires explicit quota enablement. In Vertex AI Quotas, request online prediction quota for the chosen base model in `us-central1`.
+- Ensure billing is enabled on the project and access is granted in Model Garden.
+
+Common errors
+- 429 RESOURCE_EXHAUSTED
+  - Meaning: Project quota not provisioned or depleted for Veo in this region.
+  - Fix: Request quota for `veo-3.0-generate-preview` (and/or fast) in `us-central1`. Wait for approval; then retry.
+- 404 NOT_FOUND
+  - Meaning: Model name/variant not available for this project/region.
+  - Fix: Use one of the supported IDs above; confirm region is `us-central1`; verify the model is visible in Model Garden for your project.
+
+Quick verification (read-only model artifact)
+```bash
+# Requires gcloud auth application-default login or a service account token
+curl -s \
+  -H "Authorization: Bearer $(gcloud auth print-access-token)" \
+  "https://us-central1-aiplatform.googleapis.com/v1/projects/$PROJECT/locations/us-central1/publishers/google/models/veo-3.0-generate-preview"
+```
+
+Minimal example
+```bash
+curl -X POST http://localhost:3000/api/generate-video \
+  -H "Content-Type: application/json" \
+  -d '{
+    "imageUrl": "<final_image_url>",
+    "customPrompt": "Elegant fashion camera moves",
+    "plan": "fast"
+  }'
+```
+
+
+```
 
 ### Run locally (unified serverless)
 - Build the frontend once (so Vercel can serve `client/dist`):
@@ -132,54 +249,52 @@ This script calls the serverless handlers directly to validate DB init, categori
 
 
 
-## 9) UI Enhancements – Category Item Management
+## 9) UI Enhancements – Category thumbnails with DB URLs & fallbacks
 
-The category grid UI has been refined to provide a cleaner, more compact experience. Action buttons inside each category tile have been converted from text labels to icon buttons to prevent overlap and improve readability.
+- Thumbnails are rendered directly from database URLs for `pose`, `location`, `accessory`, and `makeup` categories.
+- Robust fallbacks
+  - Broken or missing URLs gracefully show a placeholder thumbnail (no layout shift).
+  - Errors are logged to aid curation of category assets.
+- Selection UX
+  - Clicking a tile selects it; compact icon buttons remain for Replace / Regenerate / Delete.
+  - Tooltips and `aria-label`s improve accessibility; clear focus styles for keyboard users.
+- Performance
+  - Thumbnails are lazily loaded and consistently cropped to keep the grid compact and readable.
 
-- Category Grid UI Enhancements
-  - Replaced text buttons (Replace, Regenerate, Delete) with compact icons.
-  - Buttons are positioned at the top‑right of each tile and sized to fit without crowding.
-  - Functionality remains the same (file picker for Replace; confirmation dialogs for Regenerate/Delete).
+## 10) Troubleshooting
 
-- Button Changes
-  - Replace: 📷 (camera icon)
-  - Regenerate: 🔄 (refresh icon)
-  - Delete: 🗑️ (trash icon)
+### Video generation (Veo 3)
+- 429 RESOURCE_EXHAUSTED
+  - Cause: Project quota not provisioned or depleted for Veo in this region.
+  - Fix: Request online prediction quota for `veo-3.0-generate-preview` (and/or fast) in `us-central1`. Ensure billing is enabled. Wait for approval, then retry.
+- 404 NOT_FOUND
+  - Cause: Model name/variant not available for this project/region.
+  - Fix: Use one of the supported IDs (`veo-3.0-generate-preview`, `veo-3.0-fast-generate-preview`), set `VERTEX_VIDEO_LOCATION=us-central1`, and verify the model is visible in Model Garden.
+- Quick read-only check of model artifact
+  ```bash
+  curl -s \
+    -H "Authorization: Bearer $(gcloud auth print-access-token)" \
+    "https://us-central1-aiplatform.googleapis.com/v1/projects/$PROJECT/locations/us-central1/publishers/google/models/veo-3.0-generate-preview"
+  ```
 
-- Accessibility Features
-  - Each button includes a hover tooltip and an `aria-label` for screen readers.
-  - Clear focus ring for keyboard navigation.
+### Image generation (Gemini / Imagen)
+- "Found unsupported response mime type"
+  - Cause: Using `responseMimeType` with multimodal Gemini request.
+  - Resolution: Use `responseModalities: ['TEXT','IMAGE']` (already implemented) or switch to Imagen 3.
+- 404 Model not found (Gemini)
+  - Use Imagen 3 fallback by setting `VERTEX_IMAGE_MODEL=imagen-3.0-generate-001` and `VERTEX_LOCATION=us-central1`, or request access to `gemini-2.5-flash-image-preview` in `global`.
 
-- Layout Improvements
-  - Compact circular buttons (approx. 24×24px) avoid overlap with the bulk selection checkbox and other UI elements.
-  - Consistent spacing and alignment ensure all three actions are always visible and clickable on all tile sizes.
+### Cloudinary
+- 400/401 errors
+  - Verify `CLOUDINARY_CLOUD_NAME`, `CLOUDINARY_API_KEY`, `CLOUDINARY_API_SECRET`.
+  - Videos are uploaded with `resource_type: 'video'`; images use `resource_type: 'auto'`.
 
-## TODO - Post-Migration Cleanup & Issues
+### Database
+- Connection or schema issues
+  - Check `DATABASE_URL` is set in both local `.env` and Vercel env.
+  - For dev, you can call `/api/init-db` to create tables.
 
-### 1. Remove Legacy Server Folder (After Reboot)
-The empty `/server` directory is currently locked by a Windows process and cannot be deleted. After rebooting the development machine, run:
-```powershell
-Remove-Item -Recurse -Force server
-```
-This folder is a remnant from the Express.js architecture and should be completely removed to avoid confusion.
-
-### 2. Fix Production Upload Endpoint (CRITICAL)
-The deployed application at https://fashion.noblevision.com has a broken image upload functionality:
-- Error: `POST /api/upload 400 (Bad Request)`
-- Categories are loading correctly (accessory: 40, pose: 23, location: 23, makeup: 20)
-- Images are successfully stored in Cloudinary but the upload endpoint is returning 400 errors
-
-**Investigation needed:**
-- Check Vercel function logs for `/api/upload` endpoint
-- Verify multipart form handling with Busboy in serverless environment
-- Ensure all environment variables are properly set in Vercel dashboard
-- Test the upload endpoint directly to isolate frontend vs backend issues
-
-### 3. Feature Enhancement: Image Gallery Selection
-Add functionality to allow users to select from previously uploaded images stored in Cloudinary instead of only allowing new uploads. This would improve user experience by letting them reuse existing photos for different fashion generation requests.
-
-**Implementation considerations:**
-- Query Cloudinary API for user's uploaded images
-- Add image gallery UI component to the upload interface
-- Store user-image associations in the database for proper filtering
-- Add pagination for large image collections
+### Local development
+- App not reachable on http://localhost:3000
+  - Run: `npm run build` then `npm run dev` (runs `vercel dev`).
+  - If running Vite alongside, ensure `client/vite.config.js` proxies `/api` -> 3000.
