@@ -30,12 +30,9 @@ async function uploadBase64ToCloudinary(base64Data, mimeType, folder = 'fashionf
 }
 
 async function vertexGenerateImage(prompt, primaryImageBase64 = null, extraImagesBase64 = []) {
-  // REST call to Imagen 3 with optional image conditioning (single or multi-image hints)
+  // Robust generation with retry + exponential backoff for quota exhaustion
   try {
-    const auth = getGoogleAuth()
-    const client = await auth.getClient()
-    const { token } = await client.getAccessToken()
-    const projectId = process.env.VERTEX_AI_PROJECT_ID || 'fashion-472519'
+    const projectId = process.env.GOOGLE_CLOUD_PROJECT_ID || process.env.VERTEX_AI_PROJECT_ID || process.env.GCP_PROJECT || process.env.PROJECT_ID || 'fashion-472519'
     const location = 'us-central1'
     const endpoint = `https://${location}-aiplatform.googleapis.com/v1/projects/${projectId}/locations/${location}/publishers/google/models/imagen-3.0-generate-001:predict`
 
@@ -71,81 +68,166 @@ async function vertexGenerateImage(prompt, primaryImageBase64 = null, extraImage
       }
     }
 
-    console.log(`[${new Date().toISOString()}] ▶ Vertex REST request`, {
-      hasPrimary: Boolean(primaryImageBase64),
-      extraCount: Array.isArray(extraImagesBase64) ? extraImagesBase64.length : 0,
-      prompt: prompt?.slice(0, 180)
-    })
-
-    const resp = await fetch(endpoint, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${token}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify(requestBody)
-    })
-
-    if (!resp.ok) {
-      const errBody = await resp.text().catch(() => '')
-      console.error(`[${new Date().toISOString()}] ❌ Vertex AI API error:`, resp.status, errBody)
-      throw new Error(`Vertex AI API error: ${resp.status}`)
+    const MAX_RETRIES = 3
+    const messages = []
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+    const isRateLimited = (statusOrErr, details) => {
+      try {
+        if (statusOrErr === 429) return true
+        const raw = typeof details === 'string' ? details : JSON.stringify(details || {})
+        return (
+          raw.includes('RESOURCE_EXHAUSTED') ||
+          raw.includes('Too Many Requests') ||
+          raw.includes('Quota exceeded') ||
+          raw.includes('per_minute_per_project')
+        )
+      } catch { return false }
     }
 
-    const data = await resp.json()
-    const pred = data?.predictions?.[0]
-    const candidates = data?.candidates?.[0]
+    let attempts = 0
+    while (true) {
+      // Acquire a fresh access token for each attempt
+      const auth = getGoogleAuth()
+      const client = await auth.getClient()
+      const { token } = await client.getAccessToken()
 
-    // Try several common output locations
-    let out = (
-      (pred && (pred.bytesBase64Encoded || pred.imageBytesBase64 || pred.base64 || pred.image)) ||
-      (pred?.image && pred.image.bytesBase64Encoded) ||
-      (pred?.media && pred.media[0] && (pred.media[0].bytesBase64Encoded || pred.media[0].data)) ||
-      (candidates?.content?.parts || []).find(p => p.inline_data)?.inline_data?.data
-    )
-    let mt = pred?.mimeType || pred?.mime_type || 'image/png'
+      console.log(`[${new Date().toISOString()}] ▶ Vertex REST request`, {
+        projectId,
+        hasPrimary: Boolean(primaryImageBase64),
+        extraCount: Array.isArray(extraImagesBase64) ? extraImagesBase64.length : 0,
+        attempt: attempts
+      })
 
-    if (!out) {
-      // Log unexpected shape for troubleshooting
+      // 1) REST path (with timeout and detailed logging)
+      const controller = new AbortController()
+      const TIMEOUT_MS = 60000
+      const t0 = Date.now()
+      const timeoutId = setTimeout(() => controller.abort('timeout'), TIMEOUT_MS)
+      let resp
       try {
-        const keys = Object.keys(data || {})
-        console.warn(`[${new Date().toISOString()}] ℹ️ Unexpected Vertex response shape (no image). Top-level keys:`, keys)
-      } catch {}
+        resp = await fetch(endpoint, {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${token}`,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify(requestBody),
+          signal: controller.signal
+        })
+      } catch (netErr) {
+        const dur = Date.now() - t0
+        if (netErr?.name === 'AbortError') {
+          console.error(`[${new Date().toISOString()}] ⏱️ Vertex REST request timed out after ${dur}ms`)
+        } else {
+          console.error(`[${new Date().toISOString()}] 🌐 Vertex REST network error after ${dur}ms:`, netErr?.message || netErr)
+        }
+        clearTimeout(timeoutId)
+        // Continue to SDK path or backoff if rate-limited indicated in message
+        const raw = netErr?.message || ''
+        if (isRateLimited(undefined, raw)) {
+          // handled by SDK catch below; proceed to backoff loop
+        }
+        // fall through to SDK fallback
+        resp = null
+      }
+      clearTimeout(timeoutId)
 
-      // SDK fallback using official client (more tolerant to schema changes)
+      if (!resp || !resp.ok) {
+        const status = resp?.status
+        const errText = resp ? (await resp.text().catch(() => '')) : 'No response (network/timeout)'
+        if (isRateLimited(status, errText)) {
+          if (attempts < MAX_RETRIES) {
+            const delaySec = Math.pow(2, attempts + 1) // 2,4,8
+            const msg = attempts === 0
+              ? `API rate limit reached. Pausing for ${delaySec} seconds before retry (attempt 1 of ${MAX_RETRIES})...`
+              : `Still rate limited. Waiting ${delaySec} seconds before retry (attempt ${attempts + 1} of ${MAX_RETRIES})...`
+            messages.push(msg)
+            console.warn(`[${new Date().toISOString()}] ⏳ ${msg}`)
+            await sleep(delaySec * 1000)
+            attempts++
+            continue
+          } else {
+            const msg = 'Rate limit exceeded. Please try again in a few minutes.'
+            console.error(`[${new Date().toISOString()}] ❌ ${msg}`)
+            return { success: false, error: msg, rateLimited: true, messages, retryAttempts: attempts, fallbackUrl: 'https://images.unsplash.com/photo-1515886657613-9f3515b0c78f?w=800&q=80' }
+          }
+        } else {
+          console.error(`[${new Date().toISOString()}] ❌ Vertex AI REST error:`, resp.status, errText?.slice(0, 300))
+          // Fall through to SDK attempt (no backoff unless that also rate-limits)
+        }
+      } else {
+        const dur = Date.now() - t0
+        console.log(`[${new Date().toISOString()}] \u2705 Vertex REST response received`, { status: resp.status, durationMs: dur })
+        const data = await resp.json()
+        const pred = data?.predictions?.[0]
+        const candidates = data?.candidates?.[0]
+        let out = (
+          (pred && (pred.bytesBase64Encoded || pred.imageBytesBase64 || pred.base64 || pred.image)) ||
+          (pred?.image && pred.image.bytesBase64Encoded) ||
+          (pred?.media && pred.media[0] && (pred.media[0].bytesBase64Encoded || pred.media[0].data)) ||
+          (candidates?.content?.parts || []).find(p => p.inline_data)?.inline_data?.data
+        )
+        let mt = pred?.mimeType || pred?.mime_type || 'image/png'
+        if (out) return { success: true, imageBase64: out, mimeType: mt, messages, retryAttempts: attempts }
+
+        // No image found -> log and try SDK
+        try {
+          const keys = Object.keys(data || {})
+          console.warn(`[${new Date().toISOString()}] ℹ️ Unexpected Vertex response shape (no image). Top-level keys:`, keys)
+          const predKeys = pred ? Object.keys(pred) : null
+          const candLen = (candidates?.content?.parts || []).length
+          console.warn(`[${new Date().toISOString()}] ℹ️ REST response summary`, { predKeys, candLen })
+        } catch {}
+      }
+
+      // 2) SDK fallback for this attempt
       try {
         const { VertexAI } = require('@google-cloud/vertexai')
-        let credentials
-        try {
-          const raw = process.env.GOOGLE_CREDENTIALS_JSON || process.env.GOOGLE_APPLICATION_CREDENTIALS
-          if (raw && raw.trim().startsWith('{')) credentials = JSON.parse(raw)
-        } catch {}
-        const project = process.env.GOOGLE_CLOUD_PROJECT_ID || process.env.VERTEX_AI_PROJECT_ID || 'fashion-472519'
-        const vertex_ai = new (VertexAI)({
-          project,
-          location: 'us-central1',
-          googleAuthOptions: credentials ? { credentials } : undefined
+        const credentials = getCredentialsObject()
+        const project = projectId
+        console.log(`[${new Date().toISOString()}] ▶ Vertex SDK fallback starting`, {
+          hasCreds: Boolean(credentials), project,
+          hasPrimary: Boolean(primaryImageBase64),
+          extraCount: Array.isArray(extraImagesBase64) ? extraImagesBase64.length : 0,
+          attempt: attempts
         })
+        const vertex_ai = new VertexAI({ project, location: 'us-central1', googleAuthOptions: credentials ? { credentials } : undefined })
         const model = vertex_ai.preview.getGenerativeModel({ model: 'imagen-3.0-generate-001' })
         const parts = [{ text: prompt }]
         if (primaryImageBase64) parts.push({ inline_data: { mime_type: 'image/png', data: primaryImageBase64 } })
-        if (Array.isArray(extraImagesBase64)) {
-          for (const b64 of extraImagesBase64) if (b64) parts.push({ inline_data: { mime_type: 'image/png', data: b64 } })
-        }
+        if (Array.isArray(extraImagesBase64)) for (const b64 of extraImagesBase64) if (b64) parts.push({ inline_data: { mime_type: 'image/png', data: b64 } })
         const request = { contents: [{ role: 'user', parts }], generation_config: { temperature: 0.4 } }
         const sdkResult = await model.generateContent(request)
-        out = sdkResult?.response?.candidates?.[0]?.content?.parts?.find(p => p.inline_data)?.inline_data?.data
-        mt = 'image/png'
+        const sdkParts = sdkResult?.response?.candidates?.[0]?.content?.parts || []
+        const inline = sdkParts.find(p => p.inline_data)
+        console.log(`[${new Date().toISOString()}] ◀ Vertex SDK result`, { partsReturned: sdkParts.length, hasInline: Boolean(inline), inlineLen: inline?.inline_data?.data?.length || 0 })
+        const out = inline?.inline_data?.data
+        if (out) return { success: true, imageBase64: out, mimeType: 'image/png', messages, retryAttempts: attempts }
       } catch (sdkErr) {
-        console.warn(`[${new Date().toISOString()}] ⚠️ Vertex SDK fallback failed:`, sdkErr?.message || sdkErr)
+        const raw = sdkErr?.message || sdkErr
+        if (isRateLimited(sdkErr?.code, raw)) {
+          if (attempts < MAX_RETRIES) {
+            const delaySec = Math.pow(2, attempts + 1)
+            const msg = attempts === 0
+              ? `API rate limit reached. Pausing for ${delaySec} seconds before retry (attempt 1 of ${MAX_RETRIES})...`
+              : `Still rate limited. Waiting ${delaySec} seconds before retry (attempt ${attempts + 1} of ${MAX_RETRIES})...`
+            messages.push(msg)
+            console.warn(`[${new Date().toISOString()}] ⏳ ${msg}`)
+            await sleep(delaySec * 1000)
+            attempts++
+            continue
+          } else {
+            const msg = 'Rate limit exceeded. Please try again in a few minutes.'
+            console.error(`[${new Date().toISOString()}] ❌ ${msg}`)
+            return { success: false, error: msg, rateLimited: true, messages, retryAttempts: attempts, fallbackUrl: 'https://images.unsplash.com/photo-1515886657613-9f3515b0c78f?w=800&q=80' }
+          }
+        }
+        console.warn(`[${new Date().toISOString()}] ⚠️ Vertex SDK fallback failed:`, raw)
       }
-    }
 
-    if (out) {
-      return { success: true, imageBase64: out, mimeType: mt }
+      // If we reach here, neither REST nor SDK yielded an image and it wasn't rate-limited -> give up
+      return { success: false, error: 'Using fallback image', messages, retryAttempts: attempts, fallbackUrl: 'https://images.unsplash.com/photo-1515886657613-9f3515b0c78f?w=800&q=80' }
     }
-
-    throw new Error('No image data in response')
   } catch (error) {
     console.error(`[${new Date().toISOString()}] ❌ Vertex AI generation failed:`, error?.message || error)
     return {
@@ -211,21 +293,24 @@ module.exports = async (req, res) => {
 
       let stepPrompt = ''
       let extraRefs = [] // optional extra reference images to condition on
+      let refDebug = []  // urls we attempted to include (for logs)
       if (step === 'pose') {
         const poseLbl = buildLabel(pose)
         // Try to include the pose reference image as the 2nd image
         if (pose?.url) {
           const poseRef = await imageUrlToBase64(pose.url)
           if (poseRef) extraRefs.push(poseRef)
+          refDebug.push(pose?.url)
         }
-        stepPrompt = `Take the person from the first image and put them in the pose shown in the second image (${poseLbl}). Preserve the person's identity, face, and body exactly. Do not alter gender, age, skin tone, hair, facial structure, or body proportions.`
+        stepPrompt = `Take the person from the first image and put them in the pose shown in the second image (${poseLbl}). Preserve the person's identity, face, and body exactly. Do not alter gender, age, skin tone, hair, facial structure, or body proportions. The first image is the person to keep unchanged; any additional image(s) are pose/style references only.`
       } else if (step === 'location') {
         const locLbl = buildLabel(location)
         if (location?.url) {
           const locRef = await imageUrlToBase64(location.url)
           if (locRef) extraRefs.push(locRef)
+          refDebug.push(location?.url)
         }
-        stepPrompt = `Take the person from this image and place them in ${locLbl}. Keep the pose and identity unchanged. Maintain the same person without any facial or body changes.`
+        stepPrompt = `Use the first image as the subject to keep unchanged. Place this same person in ${locLbl} using the second image as a background reference only. Keep the pose and identity unchanged. Do not modify the person's face, hair, body, or proportions. Only adjust background and lighting to match the location.`
       } else if (step === 'accessory') {
         // Choose target accessory
         let accRow = null
@@ -237,8 +322,9 @@ module.exports = async (req, res) => {
         if (accRow?.url) {
           const accRef = await imageUrlToBase64(accRow.url)
           if (accRef) extraRefs.push(accRef)
+          refDebug.push(accRow?.url)
         }
-        stepPrompt = `Add ${accLbl} to the person in this image. Do not change the person's identity, pose, or location. Keep everything else the same.`
+        stepPrompt = `Use the first image as the subject to keep unchanged. Using the second image only as an accessory reference, add ${accLbl} to the same person. Do not change identity, pose, location, clothing fit, or expression.`
       } else if (step === 'makeup') {
         let mkRow = null
         if (makeupId) {
@@ -249,15 +335,33 @@ module.exports = async (req, res) => {
         if (mkRow?.url) {
           const mkRef = await imageUrlToBase64(mkRow.url)
           if (mkRef) extraRefs.push(mkRef)
+          refDebug.push(mkRow?.url)
         }
-        stepPrompt = `Apply ${mkLbl} to the person in this image. Keep everything else unchanged. Do not change identity, pose, or location.`
+        stepPrompt = `Use the first image as the subject to keep unchanged. Using the second image only as a makeup reference, apply ${mkLbl} to the same person. Keep everything else unchanged. Do not change identity, pose, or location.`
       } else {
         return res.status(400).json({ error: 'Unknown step' })
+      }
+
+      // Identity anchor: include the original user image as an additional reference
+      try {
+        const shouldAddIdentityAnchor = Boolean(userImageUrl) && typeof userImageUrl === 'string' && userImageUrl !== inputUrl
+        if (shouldAddIdentityAnchor) {
+          let idRef = null
+          if (userImageUrl.startsWith('data:')) idRef = userImageUrl.split(',')[1]
+          else idRef = await imageUrlToBase64(userImageUrl)
+          if (idRef) {
+            extraRefs.push(idRef)
+            refDebug.push(userImageUrl + ' (identity anchor)')
+          }
+        }
+      } catch (e) {
+        console.warn('Failed to add identity anchor reference:', e?.message || e)
       }
 
       const stepTs = new Date().toISOString()
       console.log(`[${stepTs}] 🔁 Step mode -> ${step}`)
       console.log(`[${stepTs}] 📝 Step prompt:`, stepPrompt)
+      console.log(`[${stepTs}] 🖼️ Using ${extraRefs.length} reference image(s):`, refDebug.filter(Boolean))
 
       const stepResult = await vertexGenerateImage(stepPrompt, inputBase64, extraRefs)
       let stepUrl
@@ -268,7 +372,7 @@ module.exports = async (req, res) => {
         stepUrl = fb ? await uploadBase64ToCloudinary(fb, 'image/jpeg') : stepResult.fallbackUrl
       }
 
-      return ok(res, { imageUrl: stepUrl, step, prompt: stepPrompt })
+      return ok(res, { imageUrl: stepUrl, step, prompt: stepPrompt, messages: stepResult.messages || [], retryAttempts: stepResult.retryAttempts || 0, rateLimited: Boolean(stepResult.rateLimited) })
     }
 
 
@@ -353,7 +457,12 @@ Guidance: Photorealistic, magazine quality, professional lighting, editorial fas
       prompt,
       status: generationStatus,
       error: errorMessage,
-      message: result.success ? 'Image generated with Imagen 3!' : 'Using fallback image - check Vertex AI configuration'
+      message: result.success
+        ? 'Image generated with Imagen 3!'
+        : (result.rateLimited ? 'Rate limit exceeded. Please try again in a few minutes.' : 'Using fallback image - check Vertex AI configuration'),
+      messages: result.messages || [],
+      retryAttempts: result.retryAttempts || 0,
+      rateLimited: Boolean(result.rateLimited)
     })
   } catch (err) {
     console.error('❌ Generation error:', err)

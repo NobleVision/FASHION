@@ -131,6 +131,29 @@ node scripts/local-verify.js
 This script calls the serverless handlers directly to validate DB init, categories, image generation, generations listing, save-generation, and video generation (with fallback if needed).
 
 
+
+## 9) UI Enhancements – Category Item Management
+
+The category grid UI has been refined to provide a cleaner, more compact experience. Action buttons inside each category tile have been converted from text labels to icon buttons to prevent overlap and improve readability.
+
+- Category Grid UI Enhancements
+  - Replaced text buttons (Replace, Regenerate, Delete) with compact icons.
+  - Buttons are positioned at the top‑right of each tile and sized to fit without crowding.
+  - Functionality remains the same (file picker for Replace; confirmation dialogs for Regenerate/Delete).
+
+- Button Changes
+  - Replace: 📷 (camera icon)
+  - Regenerate: 🔄 (refresh icon)
+  - Delete: 🗑️ (trash icon)
+
+- Accessibility Features
+  - Each button includes a hover tooltip and an `aria-label` for screen readers.
+  - Clear focus ring for keyboard navigation.
+
+- Layout Improvements
+  - Compact circular buttons (approx. 24×24px) avoid overlap with the bulk selection checkbox and other UI elements.
+  - Consistent spacing and alignment ensure all three actions are always visible and clickable on all tile sizes.
+
 ## TODO - Post-Migration Cleanup & Issues
 
 ### 1. Remove Legacy Server Folder (After Reboot)

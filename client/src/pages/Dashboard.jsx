@@ -36,6 +36,27 @@ const Dashboard = () => {
   const [chain, setChain] = useState({ base: null, pose: null, location: null, accessory: null, makeup: null })
   const [stepPrompts, setStepPrompts] = useState({ pose: null, location: null, accessory: null, makeup: null })
   const [chainPrompts, setChainPrompts] = useState({ pose: null, location: null, accessory: null, makeup: null })
+  // Inline and toastable messages for rate limiting/retries
+  const [stepMessages, setStepMessages] = useState([])
+  const [stepRateLimited, setStepRateLimited] = useState(false)
+
+  // Bulk selection and per-item loading for category management
+  const [bulkSelected, setBulkSelected] = useState({ accessory: [], pose: [], location: [], makeup: [] })
+  const [loadingKeys, setLoadingKeys] = useState(new Set())
+  const keyFor = (type, id, action = 'op') => `${type}:${id}:${action}`
+  const setItemLoading = (type, id, action, on) => {
+    setLoadingKeys((prev) => {
+      const next = new Set(prev)
+      const k = keyFor(type, id, action)
+      if (on) next.add(k); else next.delete(k)
+      return next
+    })
+  }
+  const isItemLoading = (type, id) => {
+    const base = `${type}:${id}:`
+    for (const k of loadingKeys) if (k.startsWith(base)) return true
+    return false
+  }
 
   const API_BASE = import.meta.env.VITE_API_BASE || ''
 
@@ -55,6 +76,44 @@ const Dashboard = () => {
       console.warn('Failed to fetch previous images:', error)
     }
   }
+  // Delete a single previous upload (optimistic)
+  const deletePreviousImage = async (publicId) => {
+    if (!publicId) return
+    const confirmed = window.confirm('Delete this previous upload? This cannot be undone.')
+    if (!confirmed) return
+    const backup = previousImages
+    setPreviousImages((imgs) => imgs.filter((img) => String(img.id) !== String(publicId)))
+    try {
+      const resp = await fetch(`${API_BASE}/api/uploaded-images/${encodeURIComponent(publicId)}`, { method: 'DELETE' })
+      if (!resp.ok) throw new Error(await resp.text())
+      toast.success('Previous upload deleted')
+      await fetchPreviousImages()
+    } catch (e) {
+      console.error('deletePreviousImage error:', e)
+      setPreviousImages(backup)
+      toast.error('Failed to delete upload')
+    }
+  }
+
+  // Clear all previous uploads (optimistic)
+  const clearAllPreviousImages = async () => {
+    if (!previousImages.length) return
+    const confirmed = window.confirm('Delete ALL previous uploads from Cloudinary? This cannot be undone.')
+    if (!confirmed) return
+    const backup = previousImages
+    setPreviousImages([])
+    try {
+      const resp = await fetch(`${API_BASE}/api/uploaded-images/clear`, { method: 'POST', headers: { 'Content-Type': 'application/json' } })
+      if (!resp.ok) throw new Error(await resp.text())
+      toast.success('All previous uploads cleared')
+      await fetchPreviousImages()
+    } catch (e) {
+      console.error('clearAllPreviousImages error:', e)
+      setPreviousImages(backup)
+      toast.error('Failed to clear previous uploads')
+    }
+  }
+
 
   const fetchCategories = async () => {
     try {
@@ -190,6 +249,14 @@ const Dashboard = () => {
 
       if (response.ok) {
         const data = await response.json()
+        // Show any server-provided retry/rate-limit messages
+        if (Array.isArray(data.messages) && data.messages.length) {
+          data.messages.forEach((m) => {
+            const isFinalError = /Rate limit exceeded/i.test(m) || data.rateLimited
+            if (isFinalError) toast.error(m, { duration: Infinity })
+            else toast(m, { icon: '\u23f3', duration: 3000 })
+          })
+        }
         setGeneratedImage(data.imageUrl)
         setGenerationId(data.generationId)
         setGeneratedVideoUrl(null)
@@ -276,11 +343,11 @@ const Dashboard = () => {
 
   // Step-by-step helpers
   // Step-by-step helpers
-  const getInputForStep = (step) => {
-    if (step === 'pose') return chain.base || uploadedImage
-    if (step === 'location') return chain.pose || uploadedImage
-    if (step === 'accessory') return chain.location || chain.pose || uploadedImage
-    if (step === 'makeup') return chain.accessory || chain.location || chain.pose || uploadedImage
+  const getInputForStep = (step, currentChain = chain) => {
+    if (step === 'pose') return currentChain.base || uploadedImage
+    if (step === 'location') return currentChain.pose || uploadedImage
+    if (step === 'accessory') return currentChain.location || currentChain.pose || uploadedImage
+    if (step === 'makeup') return currentChain.accessory || currentChain.location || currentChain.pose || uploadedImage
     return uploadedImage
   }
 
@@ -290,6 +357,8 @@ const Dashboard = () => {
       toast.error('Upload an image first')
       return null
     }
+    setStepMessages([])
+    setStepRateLimited(false)
     setStepLoading(true)
     try {
       const payload = {
@@ -301,14 +370,97 @@ const Dashboard = () => {
         accessoryId: selectedItems.accessory || null,
         makeupId: selectedItems.makeup || null,
       }
+      console.log('Step payload →', payload)
       const resp = await fetch(`${API_BASE}/api/generate-image`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload)
       })
       if (!resp.ok) throw new Error('Step failed')
       const data = await resp.json()
+
+      // Handle rate limit / retry messages from server
+      const msgs = Array.isArray(data.messages) ? data.messages : []
+      setStepMessages(msgs)
+      if (msgs.length) {
+        msgs.forEach((m) => {
+          // Intermediate retry info as ephemeral toasts
+          const isFinalError = /Rate limit exceeded/i.test(m) || data.rateLimited
+          if (isFinalError) {
+            toast.error(m, { duration: Infinity })
+          } else {
+            toast(m, { icon: '⏳', duration: 3000 })
+          }
+        })
+      }
+      if (data.rateLimited && !data.imageUrl) {
+        setStepRateLimited(true)
+      }
+
       setStepPreviewUrl(data.imageUrl)
       setCurrentStep(step)
       if (data.prompt) setStepPrompts(prev => ({ ...prev, [step]: data.prompt }))
+
+      // Auto-approve and continue to the next step
+      await autoAdvanceFromStep(step, data.imageUrl, data.prompt)
+      return data.imageUrl
+    } catch (e) {
+      console.error('callStep error', e)
+      toast.error('Step failed')
+      return null
+    } finally {
+      setStepLoading(false)
+    }
+  }
+
+  const callStepWithChain = async (step, currentChain) => {
+    const inputImageUrl = getInputForStep(step, currentChain)
+    if (!inputImageUrl) {
+      toast.error('Upload an image first')
+      return null
+    }
+    setStepMessages([])
+    setStepRateLimited(false)
+    setStepLoading(true)
+    try {
+      const payload = {
+        step,
+        inputImageUrl,
+        userImageUrl: uploadedImage,
+        poseId: selectedItems.pose,
+        locationId: selectedItems.location,
+        accessoryId: selectedItems.accessory || null,
+        makeupId: selectedItems.makeup || null,
+      }
+      console.log('Step payload →', payload)
+      const resp = await fetch(`${API_BASE}/api/generate-image`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload)
+      })
+      if (!resp.ok) throw new Error('Step failed')
+      const data = await resp.json()
+
+      // Handle rate limit / retry messages from server
+      const msgs = Array.isArray(data.messages) ? data.messages : []
+      setStepMessages(msgs)
+      if (msgs.length) {
+        msgs.forEach((m) => {
+          // Intermediate retry info as ephemeral toasts
+          const isFinalError = /Rate limit exceeded/i.test(m) || data.rateLimited
+          if (isFinalError) {
+            toast.error(m, { duration: Infinity })
+          } else {
+            toast(m, { icon: '⏳', duration: 3000 })
+          }
+        })
+      }
+      if (data.rateLimited && !data.imageUrl) {
+        setStepRateLimited(true)
+      }
+
+      setStepPreviewUrl(data.imageUrl)
+      setCurrentStep(step)
+      if (data.prompt) setStepPrompts(prev => ({ ...prev, [step]: data.prompt }))
+
+      // Auto-approve and continue to the next step
+      await autoAdvanceFromStep(step, data.imageUrl, data.prompt)
       return data.imageUrl
     } catch (e) {
       console.error('callStep error', e)
@@ -326,10 +478,12 @@ const Dashboard = () => {
     setGenerationId(null)
     setGeneratedVideoUrl(null)
     setUsedSelections(null)
-    setChain({ base: uploadedImage, pose: null, location: null, accessory: null, makeup: null })
+    const initialChain = { base: uploadedImage, pose: null, location: null, accessory: null, makeup: null }
+    setChain(initialChain)
     setStepPrompts({ pose: null, location: null, accessory: null, makeup: null })
     setChainPrompts({ pose: null, location: null, accessory: null, makeup: null })
-    await callStep('pose')
+    // Kick off with the explicit initial chain to avoid any state timing issues
+    await callStepWithChain('pose', initialChain)
   }
 
   const approveStep = async () => {
@@ -352,7 +506,8 @@ const Dashboard = () => {
     }
     const next = nextCandidates.find(s => s === 'location' || (s === 'accessory' && hasSelection.accessory) || (s === 'makeup' && hasSelection.makeup))
     if (next) {
-      await callStep(next)
+      // Pass the freshly updated chain to avoid stale state
+      await callStepWithChain(next, nextChain)
     } else {
       // finished
       setCurrentStep(null)
@@ -371,6 +526,54 @@ const Dashboard = () => {
     }
   }
 
+
+  // Automatically approve a finished step and continue the chain
+  const autoAdvanceFromStep = async (step, imageUrl, prompt) => {
+    try {
+      if (!imageUrl) return
+
+      // Create the updated chain state with the new step result
+      const updatedChain = { ...chain, [step]: imageUrl }
+
+      // Persist the step result into the chain state
+      setChain(updatedChain)
+      if (prompt) setChainPrompts((prev) => ({ ...prev, [step]: prompt }))
+
+      // Work out the next step based on user selections
+      const order = ['pose', 'location', 'accessory', 'makeup']
+      const idx = order.indexOf(step)
+      const nextCandidates = order.slice(idx + 1)
+      const hasSelection = {
+        location: Boolean(selectedItems.location),
+        accessory: Boolean(selectedItems.accessory),
+        makeup: Boolean(selectedItems.makeup),
+      }
+      const next = nextCandidates.find((s) => s === 'location' || (s === 'accessory' && hasSelection.accessory) || (s === 'makeup' && hasSelection.makeup))
+
+      if (next) {
+        // Pass the updated chain to ensure proper chaining
+        await callStepWithChain(next, updatedChain)
+      } else {
+        // Finished chain — finalize UI and snapshot selections
+        setCurrentStep(null)
+        setStepPreviewUrl(null)
+        const finalUrl = imageUrl || (updatedChain.makeup || updatedChain.accessory || updatedChain.location || updatedChain.pose || uploadedImage)
+        setGeneratedImage(finalUrl)
+        const findById = (arr, id) => (Array.isArray(arr) ? arr.find((i) => i.id === id) : null)
+        setUsedSelections({
+          pose: findById(categories.pose, selectedItems.pose),
+          location: findById(categories.location, selectedItems.location),
+          accessory: selectedItems.accessory ? findById(categories.accessory, selectedItems.accessory) : null,
+          makeup: selectedItems.makeup ? findById(categories.makeup, selectedItems.makeup) : null,
+        })
+        toast.success('Step-by-step complete')
+      }
+    } catch (e) {
+      console.error('autoAdvanceFromStep error', e)
+    }
+  }
+
+
   const retryStep = async () => {
     if (!currentStep) return
     await callStep(currentStep)
@@ -386,7 +589,8 @@ const Dashboard = () => {
     else if (step === 'accessory') { nextChain.accessory = null; nextChain.makeup = null }
     else if (step === 'makeup') { nextChain.makeup = null }
     setChain(nextChain)
-    await callStep(step)
+    // Ensure we use the updated chain explicitly
+    await callStepWithChain(step, nextChain)
   }
 
 
@@ -417,6 +621,153 @@ const Dashboard = () => {
     } catch (e) {
       console.error('seed-defaults error:', e)
       toast.error('Failed to seed defaults')
+    }
+  }
+
+  // Category item management handlers
+  const toggleBulkSelect = (type, id) => {
+    setBulkSelected(prev => {
+      const set = new Set(prev[type] || [])
+      const key = String(id)
+      if (set.has(key)) set.delete(key); else set.add(key)
+      return { ...prev, [type]: Array.from(set) }
+    })
+  }
+
+  const clearBulkSelect = (type) => setBulkSelected(prev => ({ ...prev, [type]: [] }))
+
+  const promptReplace = (type, id) => {
+    const input = document.createElement('input')
+    input.type = 'file'
+    input.accept = 'image/*'
+    input.onchange = (e) => {
+      const file = e.target.files && e.target.files[0]
+      if (file) replaceItemWithFile(type, id, file)
+    }
+    input.click()
+  }
+
+  const replaceItemWithFile = async (type, id, file) => {
+    try {
+      setItemLoading(type, id, 'replace', true)
+      const base64 = await new Promise((resolve, reject) => {
+        const reader = new FileReader()
+        reader.onload = (e) => resolve(String(e.target.result).split(',')[1] || '')
+        reader.onerror = reject
+        reader.readAsDataURL(file)
+      })
+      const resp = await fetch(`${API_BASE}/api/categories/${encodeURIComponent(type)}/${encodeURIComponent(id)}/replace-image`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ image: base64, mimeType: file.type || 'image/jpeg' })
+      })
+      if (!resp.ok) throw new Error(await resp.text())
+      const data = await resp.json()
+      const updated = data.item
+      if (updated?.url) {
+        setCategories(prev => ({ ...prev, [type]: (prev[type] || []).map(it => String(it.id) === String(id) ? { ...it, url: updated.url } : it) }))
+      }
+      toast.success('Image replaced')
+    } catch (e) {
+      console.error('replaceItemWithFile error:', e)
+      toast.error('Failed to replace image')
+    } finally {
+      setItemLoading(type, id, 'replace', false)
+    }
+  }
+
+  const regenerateItem = async (type, id) => {
+    const confirmed = window.confirm('Regenerate image for this item?')
+    if (!confirmed) return
+    try {
+      setItemLoading(type, id, 'regen', true)
+      const resp = await fetch(`${API_BASE}/api/categories/${encodeURIComponent(type)}/${encodeURIComponent(id)}/regenerate-image`, { method: 'POST' })
+      if (!resp.ok) throw new Error(await resp.text())
+      const data = await resp.json()
+      const updated = data.item
+      if (updated?.url) {
+        setCategories(prev => ({ ...prev, [type]: (prev[type] || []).map(it => String(it.id) === String(id) ? { ...it, url: updated.url } : it) }))
+      }
+      // Show any retry messages
+      const msgs = Array.isArray(data.messages) ? data.messages : []
+      msgs.forEach(m => toast(m, { icon: '⏳', duration: 2500 }))
+      if (data.rateLimited) toast.error('Rate limited during regeneration')
+      toast.success('Regenerated')
+    } catch (e) {
+      console.error('regenerateItem error:', e)
+      toast.error('Failed to regenerate')
+    } finally {
+      setItemLoading(type, id, 'regen', false)
+    }
+  }
+
+  const deleteItem = async (type, id) => {
+    const confirmed = window.confirm('Delete this item from the database?')
+    if (!confirmed) return
+    const backup = categories[type]
+    setCategories(prev => ({ ...prev, [type]: (prev[type] || []).filter(it => String(it.id) !== String(id)) }))
+    try {
+      const resp = await fetch(`${API_BASE}/api/categories/${encodeURIComponent(type)}/${encodeURIComponent(id)}`, { method: 'DELETE' })
+      if (!resp.ok) throw new Error(await resp.text())
+      toast.success('Item deleted')
+    } catch (e) {
+      console.error('deleteItem error:', e)
+      setCategories(prev => ({ ...prev, [type]: backup }))
+      toast.error('Failed to delete item')
+    }
+  }
+
+  const bulkDelete = async (type) => {
+    const ids = (bulkSelected[type] || []).map(String)
+    if (!ids.length) return
+    const confirmed = window.confirm(`Delete ${ids.length} selected item(s)?`)
+    if (!confirmed) return
+    const backup = categories[type]
+    setCategories(prev => ({ ...prev, [type]: (prev[type] || []).filter(it => !ids.includes(String(it.id))) }))
+    try {
+      const resp = await fetch(`${API_BASE}/api/categories/${encodeURIComponent(type)}/bulk`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'delete', ids })
+      })
+      if (!resp.ok) throw new Error(await resp.text())
+      toast.success('Selected items deleted')
+      clearBulkSelect(type)
+      await fetchCategories()
+    } catch (e) {
+      console.error('bulkDelete error:', e)
+      setCategories(prev => ({ ...prev, [type]: backup }))
+      toast.error('Failed bulk delete')
+    }
+  }
+
+  const bulkRegenerate = async (type) => {
+    const ids = (bulkSelected[type] || []).map(String)
+    if (!ids.length) return
+    const confirmed = window.confirm(`Regenerate ${ids.length} selected item(s)? This may take a while.`)
+    if (!confirmed) return
+    try {
+      // mark loading on each
+      ids.forEach(id => setItemLoading(type, id, 'regen', true))
+      const resp = await fetch(`${API_BASE}/api/categories/${encodeURIComponent(type)}/bulk`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'regenerate', ids })
+      })
+      if (!resp.ok) throw new Error(await resp.text())
+      const data = await resp.json()
+      const results = Array.isArray(data.results) ? data.results : []
+      if (results.length) {
+        setCategories(prev => ({
+          ...prev,
+          [type]: (prev[type] || []).map(it => {
+            const r = results.find(r => String(r.id) === String(it.id))
+            return r && r.url ? { ...it, url: r.url } : it
+          })
+        }))
+      }
+      toast.success('Regenerated selected items')
+      clearBulkSelect(type)
+    } catch (e) {
+      console.error('bulkRegenerate error:', e)
+      toast.error('Failed bulk regenerate')
+    } finally {
+      ids.forEach(id => setItemLoading(type, id, 'regen', false))
+      await fetchCategories()
     }
   }
 
@@ -453,27 +804,80 @@ const Dashboard = () => {
 
     return (
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-        {itemsArray.map((item) => (
-          <div
-            key={item.id}
-            onClick={() => onSelect(item.id)}
-            className={`cursor-pointer border-2 rounded-lg p-2 transition-all ${
-              selectedItems.includes(item.id)
-                ? 'border-purple-500 bg-purple-50'
-                : 'border-gray-200 hover:border-purple-300'
-            }`}
-          >
-            <img
-              src={item.url || 'https://placehold.co/300x200/e5e7eb/6b7280?text=No+Image'}
-              alt={item.name}
-              className="w-full h-24 object-cover rounded"
-              onError={(e) => {
-                e.target.src = 'https://placehold.co/300x200/e5e7eb/6b7280?text=No+Image'
-              }}
-            />
-            <p className="text-sm mt-1 text-center">{item.name}</p>
-          </div>
-        ))}
+        {itemsArray.map((item) => {
+          const checked = (bulkSelected[type] || []).map(String).includes(String(item.id))
+          const loading = isItemLoading(type, item.id)
+          return (
+            <div
+              key={item.id}
+              onClick={() => onSelect(item.id)}
+              className={`relative cursor-pointer border-2 rounded-lg p-2 transition-all ${
+                selectedItems.includes(item.id)
+                  ? 'border-purple-500 bg-purple-50'
+                  : 'border-gray-200 hover:border-purple-300'
+              }`}
+            >
+              {/* Bulk select checkbox */}
+              <input
+                type="checkbox"
+                checked={checked}
+                onChange={(e) => { e.stopPropagation(); toggleBulkSelect(type, item.id) }}
+                className="absolute top-1 left-1 h-4 w-4 accent-purple-600"
+                title="Select for bulk actions"
+              />
+
+              {/* Item actions (compact icon buttons) */}
+              <div className="absolute top-1 right-1 flex gap-1">
+                {/* Replace */}
+                <button
+                  type="button"
+                  onClick={(e) => { e.stopPropagation(); promptReplace(type, item.id) }}
+                  className="inline-flex items-center justify-center w-6 h-6 text-[13px] leading-none bg-white/90 border rounded-full shadow-sm hover:bg-white focus:outline-none focus:ring-2 focus:ring-purple-500"
+                  title="Replace image"
+                  aria-label="Replace image"
+                >
+                  📷
+                </button>
+                {/* Regenerate */}
+                <button
+                  type="button"
+                  onClick={(e) => { e.stopPropagation(); regenerateItem(type, item.id) }}
+                  className="inline-flex items-center justify-center w-6 h-6 text-[13px] leading-none bg-white/90 border rounded-full shadow-sm hover:bg-white focus:outline-none focus:ring-2 focus:ring-purple-500"
+                  title="Regenerate image"
+                  aria-label="Regenerate image"
+                >
+                  🔄
+                </button>
+                {/* Delete */}
+                <button
+                  type="button"
+                  onClick={(e) => { e.stopPropagation(); deleteItem(type, item.id) }}
+                  className="inline-flex items-center justify-center w-6 h-6 text-[13px] leading-none bg-white/90 border rounded-full shadow-sm text-red-600 hover:text-red-700 hover:bg-white focus:outline-none focus:ring-2 focus:ring-red-400"
+                  title="Delete item"
+                  aria-label="Delete item"
+                >
+                  🗑️
+                </button>
+              </div>
+
+              {loading && (
+                <div className="absolute inset-0 bg-white/60 flex items-center justify-center text-xs font-medium">
+                  Working...
+                </div>
+              )}
+
+              <img
+                src={item.url || 'https://placehold.co/300x200/e5e7eb/6b7280?text=No+Image'}
+                alt={item.name}
+                className="w-full h-24 object-cover rounded"
+                onError={(e) => {
+                  e.target.src = 'https://placehold.co/300x200/e5e7eb/6b7280?text=No+Image'
+                }}
+              />
+              <p className="text-sm mt-1 text-center">{item.name}</p>
+            </div>
+          )
+        })}
       </div>
     )
   }
@@ -514,18 +918,36 @@ const Dashboard = () => {
         {/* Previous Images Grid */}
         {showPreviousImages && previousImages.length > 0 && (
           <div className="mt-4 p-4 border rounded-lg bg-gray-50">
-            <h3 className="text-sm font-medium mb-3">Select from Previous Uploads:</h3>
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="text-sm font-medium">Select from Previous Uploads:</h3>
+              <button
+                onClick={clearAllPreviousImages}
+                className="text-xs text-red-600 hover:text-red-700 underline"
+                title="Clear all previous uploads"
+              >
+                Clear All Previous Uploads
+              </button>
+            </div>
             <div className="grid grid-cols-4 md:grid-cols-6 lg:grid-cols-8 gap-2">
               {previousImages.map((image) => (
                 <div
                   key={image.id}
                   onClick={() => setUploadedImage(image.url)}
-                  className={`cursor-pointer border-2 rounded-lg overflow-hidden transition-all ${
+                  className={`relative cursor-pointer border-2 rounded-lg overflow-hidden transition-all ${
                     uploadedImage === image.url
                       ? 'border-purple-500 ring-2 ring-purple-200'
                       : 'border-gray-200 hover:border-gray-300'
                   }`}
                 >
+                  {/* Delete button */}
+                  <button
+                    type="button"
+                    onClick={(e) => { e.stopPropagation(); deletePreviousImage(image.id) }}
+                    className="absolute top-1 right-1 bg-white/90 text-red-600 hover:text-red-700 rounded-full w-5 h-5 flex items-center justify-center shadow"
+                    title="Delete this upload"
+                  >
+                    ×
+                  </button>
                   <img
                     src={image.url}
                     alt="Previous upload"
@@ -559,7 +981,30 @@ const Dashboard = () => {
       <div className="grid grid-cols-1 md:grid-cols-2 gap-8 mb-8">
         {Object.entries(categories).map(([type, items]) => (
           <div key={type} className="bg-white rounded-lg shadow p-6">
-            <h3 className="text-lg font-semibold mb-4 capitalize">{type}</h3>
+            <h3 className="text-lg font-semibold capitalize">{type}</h3>
+            <div className="flex items-center justify-between mb-3 mt-1">
+              <div className="text-xs text-gray-500">
+                {(bulkSelected[type] && bulkSelected[type].length > 0) ? `${bulkSelected[type].length} selected` : ''}
+              </div>
+              <div className="flex gap-2">
+                <button
+                  onClick={() => bulkRegenerate(type)}
+                  disabled={!bulkSelected[type] || bulkSelected[type].length === 0}
+                  className="text-xs px-2 py-1 rounded border bg-white disabled:opacity-50"
+                  title="Regenerate images for selected items"
+                >
+                  Regenerate Selected
+                </button>
+                <button
+                  onClick={() => bulkDelete(type)}
+                  disabled={!bulkSelected[type] || bulkSelected[type].length === 0}
+                  className="text-xs px-2 py-1 rounded border bg-white text-red-600 disabled:opacity-50"
+                  title="Delete selected items"
+                >
+                  Delete Selected
+                </button>
+              </div>
+            </div>
             {renderCategoryGrid(
               items,
               type,
@@ -610,41 +1055,88 @@ const Dashboard = () => {
 
               {/* Visual chain: Original -> Pose -> Location -> Accessory -> Makeup */}
               <div className="mb-4 overflow-x-auto">
-                <div className="flex items-start gap-4">
+                <div className="flex items-start gap-6">
+
                   {/* Original */}
-                  <div className="min-w-[140px] text-center">
+                  <div className="min-w-[160px] text-center">
                     <div className="text-xs font-medium mb-1">Original</div>
                     <img src={chain.base || uploadedImage} alt="Original" className="w-32 h-32 object-cover rounded border" />
                     <div className="mt-1 text-[10px] text-gray-500">Uploaded image</div>
                   </div>
+
                   {/* After Pose */}
-                  <div className="min-w-[140px] text-center">
+                  <div className="min-w-[200px] text-center">
                     <div className="text-xs font-medium mb-1">{`After Pose${(!chain.pose && currentStep==='pose' && stepPreviewUrl) ? ' (preview)' : ''}`}</div>
-                    <img src={(chain.pose || (currentStep==='pose' ? stepPreviewUrl : null)) || 'https://placehold.co/128x128/e5e7eb/6b7280?text=Pending'} alt="After Pose" className="w-32 h-32 object-cover rounded border" />
+                    <img src={(chain.pose || (currentStep==='pose' ? stepPreviewUrl : null)) || 'https://placehold.co/128x128/e5e7eb/6b7280?text=Pending'} alt="After Pose" className="w-32 h-32 object-cover rounded border mx-auto" />
+                    {/* Reference thumbnail */}
+                    {(() => { const ref = (categories.pose || []).find(i => String(i.id) === String(selectedItems.pose)); return ref ? (
+                      <div className="mt-2 text-[10px] text-gray-600">
+                        <div className="mb-1">Using:</div>
+                        <img src={ref.url || 'https://placehold.co/80x80?text=Ref'} alt={ref.name} className="w-16 h-16 object-cover rounded border mx-auto" />
+                      </div>
+                    ) : null })()}
                     {(chain.pose ? chainPrompts.pose : (currentStep==='pose' ? stepPrompts.pose : null)) && (
                       <div className="mt-1 text-[10px] text-gray-600 whitespace-pre-wrap break-words text-left">{(chain.pose ? chainPrompts.pose : stepPrompts.pose)}</div>
                     )}
+
+                    {/* Retry / rate-limit inline notices */}
+                    {(stepMessages.length > 0 || stepRateLimited) && (
+                      <div className="mb-3 space-y-1">
+                        {stepMessages.map((m, i) => (
+                          <div key={i} className="text-xs px-2 py-1 rounded border border-yellow-300 bg-yellow-50 text-yellow-800">
+                            {m}
+                          </div>
+                        ))}
+                        {stepRateLimited && (
+                          <div className="text-xs px-2 py-1 rounded border border-red-300 bg-red-50 text-red-700 flex items-center justify-between">
+                            <span>Rate limit exceeded. Please try again in a few minutes.</span>
+                            <button className="ml-2 underline" onClick={() => { setStepRateLimited(false) }}>Dismiss</button>
+                          </div>
+                        )}
+                      </div>
+                    )}
                   </div>
+
                   {/* After Location */}
-                  <div className="min-w-[140px] text-center">
+                  <div className="min-w-[200px] text-center">
                     <div className="text-xs font-medium mb-1">{`After Location${(!chain.location && currentStep==='location' && stepPreviewUrl) ? ' (preview)' : ''}`}</div>
-                    <img src={(chain.location || (currentStep==='location' ? stepPreviewUrl : null)) || 'https://placehold.co/128x128/e5e7eb/6b7280?text=Pending'} alt="After Location" className="w-32 h-32 object-cover rounded border" />
+                    <img src={(chain.location || (currentStep==='location' ? stepPreviewUrl : null)) || 'https://placehold.co/128x128/e5e7eb/6b7280?text=Pending'} alt="After Location" className="w-32 h-32 object-cover rounded border mx-auto" />
+                    {(() => { const ref = (categories.location || []).find(i => String(i.id) === String(selectedItems.location)); return ref ? (
+                      <div className="mt-2 text-[10px] text-gray-600">
+                        <div className="mb-1">Using:</div>
+                        <img src={ref.url || 'https://placehold.co/80x80?text=Ref'} alt={ref.name} className="w-16 h-16 object-cover rounded border mx-auto" />
+                      </div>
+                    ) : null })()}
                     {(chain.location ? chainPrompts.location : (currentStep==='location' ? stepPrompts.location : null)) && (
                       <div className="mt-1 text-[10px] text-gray-600 whitespace-pre-wrap break-words text-left">{(chain.location ? chainPrompts.location : stepPrompts.location)}</div>
                     )}
                   </div>
+
                   {/* After Accessory */}
-                  <div className="min-w-[140px] text-center">
+                  <div className="min-w-[200px] text-center">
                     <div className="text-xs font-medium mb-1">{`After Accessory${(!chain.accessory && currentStep==='accessory' && stepPreviewUrl) ? ' (preview)' : ''}`}</div>
-                    <img src={(chain.accessory || (currentStep==='accessory' ? stepPreviewUrl : null)) || 'https://placehold.co/128x128/e5e7eb/6b7280?text=Pending'} alt="After Accessory" className="w-32 h-32 object-cover rounded border" />
+                    <img src={(chain.accessory || (currentStep==='accessory' ? stepPreviewUrl : null)) || 'https://placehold.co/128x128/e5e7eb/6b7280?text=Pending'} alt="After Accessory" className="w-32 h-32 object-cover rounded border mx-auto" />
+                    {(() => { const ref = selectedItems.accessory ? (categories.accessory || []).find(i => String(i.id) === String(selectedItems.accessory)) : null; return ref ? (
+                      <div className="mt-2 text-[10px] text-gray-600">
+                        <div className="mb-1">Using:</div>
+                        <img src={ref.url || 'https://placehold.co/80x80?text=Ref'} alt={ref.name} className="w-16 h-16 object-cover rounded border mx-auto" />
+                      </div>
+                    ) : null })()}
                     {(chain.accessory ? chainPrompts.accessory : (currentStep==='accessory' ? stepPrompts.accessory : null)) && (
                       <div className="mt-1 text-[10px] text-gray-600 whitespace-pre-wrap break-words text-left">{(chain.accessory ? chainPrompts.accessory : stepPrompts.accessory)}</div>
                     )}
                   </div>
+
                   {/* After Makeup */}
-                  <div className="min-w-[140px] text-center">
+                  <div className="min-w-[200px] text-center">
                     <div className="text-xs font-medium mb-1">{`After Makeup${(!chain.makeup && currentStep==='makeup' && stepPreviewUrl) ? ' (preview)' : ''}`}</div>
-                    <img src={(chain.makeup || (currentStep==='makeup' ? stepPreviewUrl : null)) || 'https://placehold.co/128x128/e5e7eb/6b7280?text=Pending'} alt="After Makeup" className="w-32 h-32 object-cover rounded border" />
+                    <img src={(chain.makeup || (currentStep==='makeup' ? stepPreviewUrl : null)) || 'https://placehold.co/128x128/e5e7eb/6b7280?text=Pending'} alt="After Makeup" className="w-32 h-32 object-cover rounded border mx-auto" />
+                    {(() => { const ref = selectedItems.makeup ? (categories.makeup || []).find(i => String(i.id) === String(selectedItems.makeup)) : null; return ref ? (
+                      <div className="mt-2 text-[10px] text-gray-600">
+                        <div className="mb-1">Using:</div>
+                        <img src={ref.url || 'https://placehold.co/80x80?text=Ref'} alt={ref.name} className="w-16 h-16 object-cover rounded border mx-auto" />
+                      </div>
+                    ) : null })()}
                     {(chain.makeup ? chainPrompts.makeup : (currentStep==='makeup' ? stepPrompts.makeup : null)) && (
                       <div className="mt-1 text-[10px] text-gray-600 whitespace-pre-wrap break-words text-left">{(chain.makeup ? chainPrompts.makeup : stepPrompts.makeup)}</div>
                     )}
