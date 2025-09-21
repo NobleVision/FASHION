@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react'
+import React, { useState, useEffect, useRef } from 'react'
 import { useDropzone } from 'react-dropzone'
 import toast from 'react-hot-toast'
 
@@ -40,6 +40,7 @@ const Dashboard = () => {
   const [stepMessages, setStepMessages] = useState([])
   const [stepRateLimited, setStepRateLimited] = useState(false)
   const [autoApprove, setAutoApprove] = useState(true)
+  const stepChainRef = useRef(null)
 
   // Bulk selection and per-item loading for category management
   const [bulkSelected, setBulkSelected] = useState({ accessory: [], pose: [], location: [], makeup: [] })
@@ -1050,7 +1051,7 @@ const Dashboard = () => {
           </div>
 
           {(currentStep || stepPreviewUrl || chain.pose || chain.location || chain.accessory || chain.makeup) && (
-            <div className="w-full max-w-6xl mx-auto mt-4 text-left">
+            <div className="w-full max-w-7xl mx-auto px-2 mt-4 text-left">
               {/* Progress */}
               <div className="flex items-center gap-3 mb-3">
                 {['pose','location','accessory','makeup'].map((s) => (
@@ -1058,29 +1059,24 @@ const Dashboard = () => {
                     chain[s] ? 'bg-green-50 text-green-700 border-green-300' : (currentStep===s ? 'bg-yellow-50 text-yellow-700 border-yellow-300' : 'bg-gray-50 text-gray-500 border-gray-300')
                   }`}>
                     {s}
-                    {/* Re-apply */}
-                    {chain.pose && (
-                      <div className="mt-2">
-                        <button className="text-[11px] underline" onClick={() => restartFrom('pose')}>Re-apply Pose</button>
-                      </div>
-                    )}
                   </div>
                 ))}
               </div>
 
               {/* Visual chain: Original -> Pose -> Location -> Accessory -> Makeup */}
-              <div className="mb-4 overflow-x-auto">
-                <div className="flex items-start gap-6">
+              <div className="mb-4 relative">
+                <div ref={stepChainRef} className="overflow-x-auto">
+                  <div className="flex items-start gap-6 snap-x snap-mandatory">
 
                   {/* Original */}
-                  <div className="min-w-[160px] text-center">
+                  <div className="min-w-[220px] text-center snap-start">
                     <div className="text-xs font-medium mb-1">Original</div>
                     <img src={chain.base || uploadedImage} alt="Original" className="w-40 h-40 object-cover rounded border" />
                     <div className="mt-1 text-[10px] text-gray-500">Uploaded image</div>
                   </div>
 
                   {/* After Pose */}
-                  <div className="min-w-[200px] text-center">
+                  <div className="min-w-[220px] text-center snap-start">
                     <div className="text-xs font-medium mb-1">{`After Pose${(!chain.pose && currentStep==='pose' && stepPreviewUrl) ? ' (preview)' : ''}`}</div>
                     <img src={(chain.pose || (currentStep==='pose' ? stepPreviewUrl : null)) || 'https://placehold.co/128x128/e5e7eb/6b7280?text=Pending'} alt="After Pose" className="w-40 h-40 object-cover rounded border mx-auto" />
                     {/* Reference thumbnail */}
@@ -1176,7 +1172,25 @@ const Dashboard = () => {
                       </div>
                     )}
                   </div>
+                  </div>
                 </div>
+                {/* Scroll controls */}
+                <button
+                  type="button"
+                  onClick={() => stepChainRef.current?.scrollBy({ left: -400, behavior: 'smooth' })}
+                  className="hidden md:flex absolute left-0 top-1/2 -translate-y-1/2 w-8 h-8 items-center justify-center rounded-full border bg-white/80 shadow hover:bg-white"
+                  aria-label="Scroll left"
+                >
+                  ◀
+                </button>
+                <button
+                  type="button"
+                  onClick={() => stepChainRef.current?.scrollBy({ left: 400, behavior: 'smooth' })}
+                  className="hidden md:flex absolute right-0 top-1/2 -translate-y-1/2 w-8 h-8 items-center justify-center rounded-full border bg-white/80 shadow hover:bg-white"
+                  aria-label="Scroll right"
+                >
+                  ▶
+                </button>
               </div>
 
               {/* Preview + controls */}
